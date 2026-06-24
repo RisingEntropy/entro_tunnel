@@ -1,0 +1,13 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Dark brick tile -->
+    <path android:fillColor="#161311" android:pathData="M0,0h108v108h-108z" />
+    <!-- Orange breach (placeholder; replace with the wall-breach logo) -->
+    <path android:fillColor="#E8540F"
+        android:pathData="M54,30 L74,46 L70,76 L38,76 L34,46 Z" />
+    <path android:fillColor="#C9430B"
+        android:pathData="M54,30 L70,76 L38,76 Z" />
+</vector>

@@ -1,0 +1,76 @@
+# EntroTunnel — Cargo workspace
+#
+# The Tauri desktop app (desktop/client-tauri/src-tauri) is intentionally NOT a
+# member of this workspace: it carries its own [workspace] table so the main
+# workspace stays fast to `cargo check` without pulling Tauri's build graph.
+# It path-depends on the `entrotunnel-core` and `entrotunnel-client` crates.
+# Layout: core/ = shared engine (内核); server/ = backend; desktop/ + mobile/ =
+# the platform clients. The Android JNI crate (mobile/android/rust) is likewise
+# detached via its own [workspace].
+[workspace]
+resolver = "2"
+members = [
+    "core/core",
+    "core/client-core",
+    "server",
+    "desktop/cli",
+]
+
+[workspace.package]
+version = "0.2.2"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["EntroTunnel contributors"]
+repository = ""
+
+[workspace.dependencies]
+# --- async runtime ---
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec", "compat"] }
+futures = "0.3"
+async-trait = "0.1"
+bytes = "1"
+
+# --- serialization / config ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1.3"
+toml = "0.8"
+
+# --- errors / logging ---
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# --- crypto / transport security ---
+# Pin the rustls/quinn/rcgen crypto provider to `ring` (pure-ish, needs only
+# cc + perl) so the full build cross-compiles to Linux without cmake/aws-lc.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2"
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+webpki-roots = "0.26"  # Mozilla CA set: trust public certs (nginx/Let's Encrypt)
+snow = "0.9"            # Noise protocol framework (raw-TCP encryption)
+rand = "0.8"
+base64 = "0.22"
+
+# --- transports ---
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+tokio-tungstenite = "0.24"
+
+# --- web admin (server) ---
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+
+# --- misc ---
+ipnet = { version = "2", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+dashmap = "6"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

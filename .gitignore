@@ -1,0 +1,47 @@
+# Rust
+/target
+**/target
+/target-linux
+Cargo.lock.bak
+
+# Node / Tauri frontend
+node_modules
+dist
+.vite
+*.local
+
+# Tauri build output
+desktop/client-tauri/src-tauri/target
+desktop/client-tauri/src-tauri/gen
+
+# Editor / OS
+.DS_Store
+.idea
+.vscode/*
+!.vscode/extensions.json
+
+# Runtime secrets / generated material
+*.pem
+*.key
+!docs/**/*.key
+server.toml.local
+client.toml.local
+data/
+*.dmg
+
+# --- NEVER COMMIT: private operator notes + deploy scripts with live secrets ---
+# memory.md = AI/project handoff with server SSH passwords, PSKs, tokens.
+# redeploy-v2.sh = redeploy helper with embedded passwords.
+memory.md
+scripts/redeploy-v2.sh
+
+# Android (mobile/android)
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/app/build/
+mobile/android/local.properties
+mobile/android/.idea/
+mobile/android/app/src/main/jniLibs/
+*.apk
+*.aab
+*.keystore

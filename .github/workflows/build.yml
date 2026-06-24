@@ -1,0 +1,156 @@
+name: build
+
+# Builds on every push (any branch), on version tags, and on manual dispatch.
+# Every run uploads the desktop GUI installers + server/CLI binaries as workflow
+# artifacts. A tag push (e.g. v0.1) additionally collects them all into one
+# GitHub Release.
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # create/update Releases on tag builds
+
+jobs:
+  # ------------------------------------------------------------------
+  # Desktop GUI (Tauri) — macOS (universal), Windows, Linux
+  # ------------------------------------------------------------------
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+            # Explicit bundle list per OS so Tauri doesn't try to build an RPM on
+            # the runner (no rpmbuild) and fail the whole job.
+            tauri-args: "--target universal-apple-darwin --bundles app,dmg"
+            bundle: "desktop/client-tauri/src-tauri/target/universal-apple-darwin/release/bundle"
+          - os: ubuntu-22.04
+            rust-targets: ""
+            tauri-args: "--bundles deb,appimage"
+            bundle: "desktop/client-tauri/src-tauri/target/release/bundle"
+          - os: windows-latest
+            rust-targets: ""
+            tauri-args: "--bundles msi,nsis"
+            bundle: "desktop/client-tauri/src-tauri/target/release/bundle"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf build-essential curl wget file libxdo-dev libssl-dev
+
+      # ring (via rustls) assembles with NASM on Windows.
+      - name: Install NASM (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "desktop/client-tauri/src-tauri -> target"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install frontend deps
+        working-directory: desktop/client-tauri
+        run: yarn install --frozen-lockfile
+
+      - name: Build desktop app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: desktop/client-tauri
+          args: ${{ matrix.tauri-args }}
+
+      - name: Upload desktop installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: entrotunnel-desktop-${{ matrix.os }}
+          if-no-files-found: error
+          path: |
+            ${{ matrix.bundle }}/dmg/*.dmg
+            ${{ matrix.bundle }}/deb/*.deb
+            ${{ matrix.bundle }}/appimage/*.AppImage
+            ${{ matrix.bundle }}/msi/*.msi
+            ${{ matrix.bundle }}/nsis/*.exe
+
+  # ------------------------------------------------------------------
+  # Server + CLI binaries — macOS, Windows, Linux
+  # ------------------------------------------------------------------
+  cli-server:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install NASM (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build server + CLI (release)
+        run: cargo build --release -p entrotunnel-cli -p entrotunnel-server
+
+      - name: Stage binaries
+        shell: bash
+        run: |
+          mkdir -p dist
+          ext=""
+          [ "${{ runner.os }}" = "Windows" ] && ext=".exe"
+          for b in entrotunnel-cli entrotunnel-server; do
+            cp "target/release/$b$ext" "dist/$b-${{ matrix.os }}$ext"
+          done
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: entrotunnel-bin-${{ matrix.os }}
+          path: dist/*
+
+  # ------------------------------------------------------------------
+  # On a tag: collect every artifact into one GitHub Release.
+  # Runs even if some matrix legs failed, so a partial release still ships.
+  # ------------------------------------------------------------------
+  release:
+    needs: [desktop, cli-server]
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: List collected files
+        run: find artifacts -type f | sort
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: EntroTunnel ${{ github.ref_name }}
+          body: |
+            Desktop installers (macOS `.dmg`, Windows `.msi`/`.exe`, Linux `.deb`/`.AppImage`)
+            and server/CLI binaries for all three OSes.
+
+            These are **unsigned** builds — on macOS, right-click the app → Open (or run
+            `xattr -dr com.apple.quarantine /Applications/EntroTunnel.app`) the first time.
+          fail_on_unmatched_files: false
+          files: artifacts/**/*

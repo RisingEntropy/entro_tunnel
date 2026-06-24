@@ -1,0 +1,18 @@
+[Unit]
+Description=EntroTunnel server
+Documentation=https://github.com/RisingEntropy/entro_tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Needs root: creates a TUN device and installs iptables NAT rules.
+ExecStart=/usr/local/bin/entrotunnel-server -c /etc/entrotunnel/server.toml run
+Restart=on-failure
+RestartSec=3
+Environment=RUST_LOG=info
+# Hardening (kept loose because the service manages the network namespace).
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

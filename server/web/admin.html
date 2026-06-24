@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>EntroTunnel — Admin</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1e222b; --line: #2a2f3a;
+    --fg: #e6e9ef; --muted: #8a93a6; --accent: #5b8cff; --ok: #3ecf8e; --bad: #ff5c72;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 16px 24px;
+    border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .3px; }
+  header .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); }
+  header .dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  main { max-width: 980px; margin: 0 auto; padding: 24px; display: grid; gap: 20px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .8px;
+    color: var(--muted); margin: 0 0 14px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px,1fr)); gap: 12px; }
+  .stat { background: var(--panel2); border-radius: 8px; padding: 10px 12px; }
+  .stat .k { color: var(--muted); font-size: 11px; text-transform: uppercase; }
+  .stat .v { font-size: 15px; font-weight: 600; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); font-size: 13px; }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; }
+  td.mono, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; }
+  .pill .d { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .pill.on .d { background: var(--ok); }
+  .tag { background: var(--panel2); border: 1px solid var(--line); border-radius: 5px;
+    padding: 1px 7px; font-size: 11px; color: var(--muted); }
+  button, input[type=text], input[type=number], select { font: inherit; }
+  input[type=text], input[type=number], select {
+    background: var(--panel2); border: 1px solid var(--line); color: var(--fg);
+    border-radius: 7px; padding: 8px 10px; width: 100%; }
+  label { display: block; font-size: 11px; color: var(--muted); margin: 0 0 4px; }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 7px;
+    padding: 8px 14px; cursor: pointer; font-weight: 600; }
+  button.ghost { background: transparent; border: 1px solid var(--line); color: var(--fg); font-weight: 500; }
+  button.small { padding: 5px 10px; font-size: 12px; }
+  button.danger { background: transparent; border: 1px solid var(--bad); color: var(--bad); padding: 5px 10px; }
+  .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px,1fr)); gap: 12px; align-items: end; }
+  .checks { display: flex; gap: 16px; align-items: center; }
+  .checks label { display: flex; gap: 6px; align-items: center; color: var(--fg); font-size: 13px; }
+  #gate { max-width: 420px; margin: 80px auto; }
+  .err { color: var(--bad); font-size: 12px; min-height: 16px; }
+  .acts { display: flex; gap: 6px; justify-content: flex-end; }
+
+  /* Export modal */
+  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none;
+    align-items: center; justify-content: center; z-index: 10; }
+  .modal-bg.show { display: flex; }
+  .modal { background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    width: 560px; max-width: calc(100vw - 32px); padding: 22px 24px; }
+  .modal h3 { margin: 0 0 4px; font-size: 16px; }
+  .modal .hint { color: var(--muted); font-size: 12px; margin: 0 0 16px; }
+  .modal .link { background: var(--bg); border: 1px solid var(--line); border-radius: 9px;
+    padding: 12px; font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+    word-break: break-all; max-height: 120px; overflow-y: auto; margin: 14px 0; }
+  .modal .foot { display: flex; gap: 10px; justify-content: flex-end; margin-top: 4px; }
+
+  /* Statistics + charts */
+  .muted-since { color: var(--muted); font-size: 11px; text-transform: none; letter-spacing: 0; margin-left: 8px; }
+  .charts { display: flex; gap: 16px; flex-wrap: wrap; margin: 4px 0 16px; }
+  .chart-box { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; flex: 1; min-width: 240px; }
+  .chart-box.wide { width: 100%; flex-basis: 100%; }
+  .chart-title { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin-bottom: 12px; display: flex; align-items: center; gap: 10px; }
+  .donut-wrap { display: flex; align-items: center; gap: 18px; }
+  .donut-wrap svg { flex: none; }
+  .legend { display: flex; flex-direction: column; gap: 7px; font-size: 12px; min-width: 0; flex: 1; }
+  .legend .it { display: flex; align-items: center; gap: 8px; }
+  .legend .sw { width: 11px; height: 11px; border-radius: 3px; flex: none; }
+  .legend .nm { color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .legend .vl { color: var(--muted); margin-left: auto; font-variant-numeric: tabular-nums; padding-left: 8px; }
+  .donut-center .big { font-size: 17px; font-weight: 700; fill: var(--fg); }
+  .donut-center .sml { font-size: 9px; fill: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  .tput-legend { display: inline-flex; gap: 12px; font-size: 11px; color: var(--muted); text-transform: none; letter-spacing: 0; }
+  .tput-legend b { font-weight: 600; }
+  .up-c { color: #5b8cff; } .down-c { color: #7c5bff; }
+</style>
+</head>
+<body>
+<div id="gate" class="card" style="display:none">
+  <h2>Admin token</h2>
+  <input id="tokenInput" type="text" placeholder="paste web.admin_token from server.toml" />
+  <div style="margin-top:12px"><button onclick="saveToken()">Connect</button></div>
+  <div class="err" id="gateErr"></div>
+</div>
+
+<div id="app" style="display:none">
+  <header>
+    <div class="dot" id="liveDot"></div>
+    <h1>EntroTunnel Admin</h1>
+    <div style="flex:1"></div>
+    <button class="ghost" onclick="logout()">Logout</button>
+  </header>
+  <main>
+    <div class="card" id="statsCard">
+      <h2>Statistics <span class="muted-since" id="uptime"></span></h2>
+      <div class="grid" id="statTiles" style="margin-bottom:16px"></div>
+      <div class="charts">
+        <div class="chart-box">
+          <div class="chart-title">Clients by mode</div>
+          <div class="donut-wrap"><div id="modeDonut"></div><div class="legend" id="modeLegend"></div></div>
+        </div>
+        <div class="chart-box">
+          <div class="chart-title">Traffic by client</div>
+          <div class="donut-wrap"><div id="trafficDonut"></div><div class="legend" id="trafficLegend"></div></div>
+        </div>
+      </div>
+      <div class="chart-box wide">
+        <div class="chart-title">Throughput, last ~15 min <span class="tput-legend" id="tputLegend"></span></div>
+        <div id="tputChart"></div>
+      </div>
+      <table style="margin-top:16px">
+        <thead><tr><th>Client</th><th>Mode</th><th>Status</th><th>↑ Up</th><th>↓ Down</th><th>Connected</th></tr></thead>
+        <tbody id="statPeers"></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h2>Network</h2>
+      <div class="grid" id="netGrid"></div>
+    </div>
+    <div class="card">
+      <h2>Listeners</h2>
+      <table><thead><tr><th>Transport</th><th>Bind</th></tr></thead><tbody id="listeners"></tbody></table>
+    </div>
+    <div class="card">
+      <h2>Peers</h2>
+      <table>
+        <thead><tr><th>Status</th><th>Name</th><th>Virtual IP</th><th>Token</th><th>Flags</th><th></th></tr></thead>
+        <tbody id="peers"></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h2>Add peer</h2>
+      <div class="row">
+        <div><label>Name</label><input id="pName" type="text" placeholder="laptop"></div>
+        <div><label>Virtual IP</label><input id="pIp" type="text" placeholder="10.66.0.3"></div>
+        <div><label>Token</label><input id="pToken" type="text"></div>
+        <div><button class="ghost" onclick="genToken()">Generate token</button></div>
+      </div>
+      <div class="checks" style="margin-top:14px">
+        <label><input type="checkbox" id="pGlobal" checked> allow global proxy</label>
+        <label><input type="checkbox" id="pHttp" checked> allow HTTP proxy</label>
+        <label><input type="checkbox" id="pEnabled" checked> enabled</label>
+        <div style="flex:1"></div>
+        <button onclick="addPeer()">Add peer</button>
+      </div>
+      <div class="err" id="addErr"></div>
+    </div>
+  </main>
+</div>
+
+<!-- Export-config modal -->
+<div class="modal-bg" id="exportModal">
+  <div class="modal">
+    <h3>Export client config</h3>
+    <p class="hint">Builds an importable link for <b id="exName">peer</b>. The client
+      pastes this on its <i>Profiles → Import</i> screen. The mode (TUN / proxy / VPN)
+      is chosen on the client, not here.</p>
+    <div class="row">
+      <div>
+        <label>Transport</label>
+        <select id="exTransport" onchange="exPreset()"></select>
+      </div>
+      <div>
+        <label>Host (public)</label>
+        <input id="exHost" type="text">
+      </div>
+      <div>
+        <label>Port</label>
+        <input id="exPort" type="number">
+      </div>
+    </div>
+    <div class="checks" style="margin-top:12px">
+      <label><input type="checkbox" id="exSkip"> skip TLS verify (self-signed WSS/QUIC)</label>
+    </div>
+    <div class="link" id="exLink"></div>
+    <div class="foot">
+      <button class="ghost" onclick="closeExport()">Close</button>
+      <button onclick="copyLink()">Copy link</button>
+    </div>
+    <div class="err" id="exErr"></div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let TOKEN = localStorage.getItem("et_admin_token") || "";
+let S = null;          // last /api/status payload
+let EX = null;         // { token, name } currently being exported
+
+function uuid() {
+  return (crypto.randomUUID && crypto.randomUUID()) ||
+    'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+      const r = Math.random()*16|0, v = c==='x'?r:(r&0x3|0x8); return v.toString(16); });
+}
+function genToken(){ $("#pToken").value = uuid(); }
+
+async function api(path, opts={}) {
+  const sep = path.includes('?') ? '&' : '?';
+  const res = await fetch(path + sep + 'token=' + encodeURIComponent(TOKEN), opts);
+  return res;
+}
+
+function showGate(msg){ $("#app").style.display="none"; $("#gate").style.display="block";
+  if(msg) $("#gateErr").textContent = msg; }
+function showApp(){ $("#gate").style.display="none"; $("#app").style.display="block"; }
+function saveToken(){ TOKEN = $("#tokenInput").value.trim();
+  localStorage.setItem("et_admin_token", TOKEN); refresh(true); }
+function logout(){ localStorage.removeItem("et_admin_token"); TOKEN=""; showGate(); }
+
+function flags(p){
+  const f=[]; if(p.allow_global)f.push("global"); if(p.allow_http_proxy)f.push("http");
+  if(!p.enabled)f.push("disabled");
+  return f.map(x=>`<span class="tag">${x}</span>`).join(" ");
+}
+
+/* ---- Statistics + charts ----------------------------------------------- */
+const MODE_COLORS = { global_proxy:"#5b8cff", vpn:"#7c5bff", http_proxy:"#38d39f" };
+const MODE_NAME = { global_proxy:"Global proxy", vpn:"VPN", http_proxy:"HTTP proxy" };
+const PALETTE = ["#5b8cff","#7c5bff","#38d39f","#ffb454","#ff5d72","#42c7d6","#b06bff","#f0a93b"];
+
+function fmtBytes(n){ n=+n||0; const u=["B","KB","MB","GB","TB"]; let i=0;
+  while(n>=1024 && i<u.length-1){ n/=1024; i++; }
+  return (i===0 ? n : n.toFixed(n<10?2:1)) + " " + u[i]; }
+function fmtDur(s){ s=Math.floor(+s||0); const d=Math.floor(s/86400), h=Math.floor(s%86400/3600),
+  m=Math.floor(s%3600/60), sec=s%60;
+  if(d) return `${d}d ${h}h`; if(h) return `${h}h ${m}m`; if(m) return `${m}m ${sec}s`; return `${sec}s`; }
+
+function polar(cx,cy,r,deg){ const a=(deg-90)*Math.PI/180; return [cx+r*Math.cos(a), cy+r*Math.sin(a)]; }
+function arcPath(cx,cy,r,a0,a1){ const [x0,y0]=polar(cx,cy,r,a0), [x1,y1]=polar(cx,cy,r,a1);
+  const large=(a1-a0)>180?1:0;
+  return `M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}`; }
+function donut(segs, big, sml, size=150, thick=20){
+  const vals = segs.filter(s=>s.value>0);
+  const total = vals.reduce((a,s)=>a+s.value,0);
+  const cx=size/2, cy=size/2, r=(size-thick)/2-2;
+  let body="";
+  if(total<=0) body=`<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="var(--line)" stroke-width="${thick}"/>`;
+  else if(vals.length===1) body=`<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${vals[0].color}" stroke-width="${thick}"/>`;
+  else { let acc=0; for(const s of vals){ const a0=acc/total*360; acc+=s.value; const a1=acc/total*360;
+    body+=`<path d="${arcPath(cx,cy,r,a0,Math.max(a0+0.4,a1-0.8))}" fill="none" stroke="${s.color}" stroke-width="${thick}" stroke-linecap="round"/>`; } }
+  return `<svg viewBox="0 0 ${size} ${size}" width="${size}" height="${size}">${body}
+    <g class="donut-center" text-anchor="middle">
+      <text x="${cx}" y="${cy}" class="big">${big}</text>
+      <text x="${cx}" y="${cy+14}" class="sml">${sml}</text></g></svg>`;
+}
+function legend(items){ return items.map(it =>
+  `<div class="it"><span class="sw" style="background:${it.color}"></span>
+    <span class="nm">${esc(it.label)}</span><span class="vl">${it.val}</span></div>`).join(""); }
+
+function tputChart(samples, w=580, h=150){
+  if(!samples || samples.length < 2)
+    return `<div style="color:var(--muted);font-size:12px;padding:22px 0">Collecting… traffic appears here as clients transfer data.</div>`;
+  const pad=4, n=samples.length;
+  const maxV=Math.max(1, ...samples.map(s=>s.up+s.down));
+  const X=i=> pad + i/(n-1)*(w-2*pad);
+  const Y=v=> (h-pad) - v/maxV*(h-2*pad);
+  const tot = samples.map((s,i)=>`${X(i).toFixed(1)},${Y(s.up+s.down).toFixed(1)}`);
+  const area = `M ${X(0).toFixed(1)},${(h-pad).toFixed(1)} L ${tot.join(" L ")} L ${X(n-1).toFixed(1)},${(h-pad).toFixed(1)} Z`;
+  const line = a => "M " + samples.map((s,i)=>`${X(i).toFixed(1)},${Y(a(s)).toFixed(1)}`).join(" L ");
+  return `<svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}" preserveAspectRatio="none">
+    <defs><linearGradient id="ag" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0" stop-color="#5b8cff" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="#5b8cff" stop-opacity="0.02"/></linearGradient></defs>
+    <path d="${area}" fill="url(#ag)" stroke="none"/>
+    <path d="${line(s=>s.down)}" fill="none" stroke="#7c5bff" stroke-width="1.4" stroke-linejoin="round"/>
+    <path d="${line(s=>s.up)}" fill="none" stroke="#5b8cff" stroke-width="1.6" stroke-linejoin="round"/>
+  </svg>`;
+}
+
+function renderStats(st){
+  $("#uptime").textContent = "· uptime " + fmtDur(st.uptime_secs);
+  $("#statTiles").innerHTML =
+    stat("Online clients", st.online) +
+    stat("Total up", fmtBytes(st.total_up)) +
+    stat("Total down", fmtBytes(st.total_down)) +
+    stat("Tracked clients", st.peers.length);
+
+  // Clients by mode (online only) — answers "who is on VPN vs proxy".
+  const online = st.peers.filter(p=>p.online);
+  const byMode = {};
+  online.forEach(p=>{ const m=p.mode||"unknown"; byMode[m]=(byMode[m]||0)+1; });
+  const modeKeys = Object.keys(byMode);
+  $("#modeDonut").innerHTML = donut(
+    modeKeys.map(m=>({value:byMode[m], color:MODE_COLORS[m]||"#7a8499"})),
+    String(online.length), "online");
+  $("#modeLegend").innerHTML = modeKeys.length
+    ? legend(modeKeys.map(m=>({color:MODE_COLORS[m]||"#7a8499", label:MODE_NAME[m]||m, val:byMode[m]})))
+    : `<div style="color:var(--muted);font-size:12px">No clients connected.</div>`;
+
+  // Traffic by client (top contributors).
+  const top = st.peers.filter(p=>(p.up+p.down)>0).slice(0,8);
+  const grand = st.total_up + st.total_down;
+  const gb = fmtBytes(grand).split(" ");
+  $("#trafficDonut").innerHTML = donut(
+    top.map((p,i)=>({value:p.up+p.down, color:PALETTE[i%PALETTE.length]})), gb[0], gb[1]||"B");
+  $("#trafficLegend").innerHTML = top.length
+    ? legend(top.map((p,i)=>({color:PALETTE[i%PALETTE.length], label:p.name||p.ip, val:fmtBytes(p.up+p.down)})))
+    : `<div style="color:var(--muted);font-size:12px">No traffic yet.</div>`;
+
+  // Throughput over time.
+  $("#tputChart").innerHTML = tputChart(st.timeline);
+  const peak = (st.timeline.length ? Math.max(0, ...st.timeline.map(s=>s.up+s.down)) : 0) / 5;
+  $("#tputLegend").innerHTML =
+    `<span class="up-c">●</span> <b>up</b> &nbsp; <span class="down-c">●</span> <b>down</b> &nbsp;· peak ${fmtBytes(peak)}/s`;
+
+  // Per-client table.
+  $("#statPeers").innerHTML = st.peers.length ? st.peers.map(p=>`
+    <tr>
+      <td>${esc(p.name)}</td>
+      <td><span class="tag">${MODE_NAME[p.mode]||p.mode||'—'}</span></td>
+      <td><span class="pill ${p.online?'on':''}"><span class="d"></span>${p.online?'online':'offline'}</span></td>
+      <td class="mono">${fmtBytes(p.up)}</td>
+      <td class="mono">${fmtBytes(p.down)}</td>
+      <td class="mono">${p.online?fmtDur(p.connected_secs):'—'}</td>
+    </tr>`).join("") : `<tr><td colspan="6" style="color:var(--muted)">No client traffic recorded yet.</td></tr>`;
+}
+
+async function refresh(fromGate){
+  if(!TOKEN){ showGate(); return; }
+  let res;
+  try { res = await api('/api/status'); }
+  catch(e){ $("#liveDot").classList.remove("on"); return; }
+  if(res.status===401){ showGate(fromGate ? "Invalid token" : ""); return; }
+  if(!res.ok){ $("#liveDot").classList.remove("on"); return; }
+  showApp();
+  $("#liveDot").classList.add("on");
+  S = await res.json();
+  $("#netGrid").innerHTML =
+    stat("Subnet", S.subnet) + stat("Gateway", S.gateway) + stat("MTU", S.mtu) +
+    stat("Peers online", S.peers.filter(p=>p.online).length + " / " + S.peers.length);
+  $("#listeners").innerHTML = S.listeners.map(l =>
+    `<tr><td class="mono">${l.transport.toUpperCase()}</td><td class="mono">${l.bind}</td></tr>`).join("");
+  $("#peers").innerHTML = S.peers.map(p => `
+    <tr>
+      <td><span class="pill ${p.online?'on':''}"><span class="d"></span>${p.online?(p.mode||'on'):'offline'}</span></td>
+      <td>${esc(p.name)}</td>
+      <td class="mono">${p.ip}</td>
+      <td class="mono" title="${p.token}">${p.token.slice(0,8)}…</td>
+      <td>${flags(p)}</td>
+      <td><div class="acts">
+        <button class="ghost small" onclick="openExport('${p.token}', this)">Export</button>
+        <button class="danger" onclick="delPeer('${p.token}')">remove</button>
+      </div></td>
+    </tr>`).join("");
+  // Live statistics (in-memory; resets when the server restarts).
+  try { const r2 = await api('/api/stats'); if(r2.ok) renderStats(await r2.json()); } catch(e){}
+}
+function stat(k,v){ return `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`; }
+function esc(s){ return String(s).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+async function addPeer(){
+  $("#addErr").textContent="";
+  const body = {
+    name: $("#pName").value.trim() || "peer",
+    token: $("#pToken").value.trim() || uuid(),
+    ip: $("#pIp").value.trim(),
+    enabled: $("#pEnabled").checked,
+    allow_global: $("#pGlobal").checked,
+    allow_http_proxy: $("#pHttp").checked,
+  };
+  if(!body.ip){ $("#addErr").textContent="Virtual IP is required"; return; }
+  const res = await api('/api/peers', { method:'POST',
+    headers:{'content-type':'application/json'}, body: JSON.stringify(body) });
+  if(res.status===201){ $("#pName").value=$("#pIp").value=$("#pToken").value=""; refresh(); }
+  else if(res.status===409) $("#addErr").textContent="Token or IP already in use";
+  else $("#addErr").textContent="Failed ("+res.status+")";
+}
+async function delPeer(token){
+  if(!confirm("Remove this peer?")) return;
+  await api('/api/peers/'+encodeURIComponent(token), { method:'DELETE' });
+  refresh();
+}
+
+/* ---- Export client config ---------------------------------------------- */
+function portOf(bind){ const m = String(bind).match(/:(\d+)$/); return m ? +m[1] : 8443; }
+
+function openExport(token, btn){
+  const p = (S && S.peers || []).find(x => x.token === token);
+  if(!p) return;
+  EX = { token, name: p.name };
+  $("#exName").textContent = p.name;
+  $("#exErr").textContent = "";
+  // Transport options from the server's listeners (dedup, keep order).
+  const seen = {}, opts = [];
+  (S.listeners || []).forEach(l => { const t = l.transport.toLowerCase();
+    if(!seen[t]){ seen[t]=l.bind; opts.push(t); } });
+  if(opts.length===0) opts.push("tcp");
+  $("#exTransport").innerHTML = opts.map(t =>
+    `<option value="${t}">${t.toUpperCase()}</option>`).join("");
+  $("#exHost").value = location.hostname || "";
+  exPreset();
+  $("#exportModal").classList.add("show");
+}
+// When transport changes, default port to that listener's bind port and TLS-skip.
+function exPreset(){
+  const t = $("#exTransport").value;
+  const l = (S.listeners || []).find(x => x.transport.toLowerCase() === t);
+  $("#exPort").value = l ? portOf(l.bind) : (t==="tcp"?8443:t==="ws"?8444:8445);
+  // Default "skip verify" only when the server terminates TLS itself with a
+  // self-signed cert (listener tls=true). A tls=false listener sits behind a
+  // proxy (nginx + real cert) → verification should stay on.
+  $("#exSkip").checked = (t === "ws" || t === "quic") && (l ? l.tls !== false : true);
+  buildLink();
+}
+function b64utf8(str){
+  const bytes = new TextEncoder().encode(str);
+  let bin = ""; bytes.forEach(b => bin += String.fromCharCode(b));
+  return btoa(bin);
+}
+function buildLink(){
+  if(!EX || !S) return;
+  const t = $("#exTransport").value;
+  const profile = {
+    name: EX.name,
+    selected_server: EX.name,
+    servers: [{
+      name: EX.name,
+      host: $("#exHost").value.trim(),
+      port: +$("#exPort").value || portOf(""),
+      transport: t,
+      token: EX.token,
+      noise_psk: S.noise_psk,
+      tls_skip_verify: $("#exSkip").checked,
+    }],
+  };
+  $("#exLink").textContent = "entro://" + b64utf8(JSON.stringify(profile));
+}
+function closeExport(){ $("#exportModal").classList.remove("show"); EX = null; }
+async function copyLink(){
+  const text = $("#exLink").textContent;
+  try { await navigator.clipboard.writeText(text); $("#exErr").style.color="var(--ok)";
+    $("#exErr").textContent = "Copied to clipboard"; }
+  catch(e){ $("#exErr").style.color="var(--bad)";
+    $("#exErr").textContent = "Copy failed — select the link text and copy manually"; }
+}
+["exHost","exPort","exSkip"].forEach(id => {
+  document.getElementById(id).addEventListener("input", buildLink);
+  document.getElementById(id).addEventListener("change", buildLink);
+});
+$("#exportModal").addEventListener("click", e => { if(e.target.id==="exportModal") closeExport(); });
+
+if(TOKEN) refresh(); else showGate();
+genToken();
+setInterval(()=>{ if(TOKEN && !$("#exportModal").classList.contains("show")) refresh(); }, 3000);
+</script>
+</body>
+</html>

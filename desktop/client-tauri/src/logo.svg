@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <defs>
+    <pattern id="brk" width="66" height="34" patternUnits="userSpaceOnUse">
+      <rect width="66" height="34" fill="#2c211a"></rect>
+      <rect x="2" y="2" width="62" height="13" rx="1.5" fill="#6e3318"></rect>
+      <rect x="35" y="19" width="62" height="13" rx="1.5" fill="#6e3318"></rect>
+      <rect x="-31" y="19" width="62" height="13" rx="1.5" fill="#6e3318"></rect>
+    </pattern>
+    <clipPath id="tileRound"><rect x="2" y="2" width="196" height="196" rx="44"></rect></clipPath>
+    <clipPath id="holeA"><path clip-rule="evenodd" d="M0,0 H200 V200 H0 Z M40,86 L58,72 L52,52 L82,66 L100,46 L120,64 L150,52 L146,80 L162,100 L146,122 L160,150 L126,138 L112,160 L92,142 L64,156 L60,126 L38,118 L54,102 Z"></path></clipPath>
+  </defs>
+  <rect x="2" y="2" width="196" height="196" rx="44" fill="#161311"></rect>
+  <g clip-path="url(#tileRound)">
+    <rect width="200" height="200" fill="url(#brk)" clip-path="url(#holeA)"></rect>
+    <path d="M58,72 L42,58 L46,38" stroke="#1c140f" stroke-width="3" fill="none"></path>
+    <path d="M150,52 L170,40" stroke="#1c140f" stroke-width="3" fill="none"></path>
+    <path d="M120,64 L132,42" stroke="#1c140f" stroke-width="3" fill="none"></path>
+    <path d="M60,126 L40,140 L30,160" stroke="#1c140f" stroke-width="3" fill="none"></path>
+    <path d="M160,150 L178,164" stroke="#1c140f" stroke-width="3" fill="none"></path>
+    <rect x="150" y="36" width="15" height="8" rx="1.5" fill="#6e3318" transform="rotate(24 157 40)"></rect>
+    <rect x="28" y="40" width="15" height="8" rx="1.5" fill="#6e3318" transform="rotate(-18 35 44)"></rect>
+    <rect x="92" y="28" width="14" height="8" rx="1.5" fill="#6e3318" transform="rotate(10 99 32)"></rect>
+    <rect x="36" y="150" width="15" height="8" rx="1.5" fill="#6e3318" transform="rotate(18 43 154)"></rect>
+    <rect x="158" y="150" width="15" height="8" rx="1.5" fill="#6e3318" transform="rotate(-22 165 154)"></rect>
+  </g>
+  <polygon points="64,112 20,116 64,122" fill="#e8540f"></polygon>
+  <polygon points="64,124 26,138 64,132" fill="#e8540f"></polygon>
+  <polygon points="64,134 34,152 64,142" fill="#e8540f"></polygon>
+  <polygon points="136,112 180,116 136,122" fill="#e8540f"></polygon>
+  <polygon points="136,124 174,138 136,132" fill="#e8540f"></polygon>
+  <polygon points="136,134 166,152 136,142" fill="#e8540f"></polygon>
+  <polygon points="62,102 16,60 42,98" fill="#e8540f"></polygon>
+  <polygon points="62,114 24,96 50,108" fill="#e8540f"></polygon>
+  <polygon points="138,102 184,60 158,98" fill="#e8540f"></polygon>
+  <polygon points="138,114 176,96 150,108" fill="#e8540f"></polygon>
+  <polygon points="100,80 140,100 132,142 68,142 60,100" fill="#e8540f"></polygon>
+  <polygon points="100,80 132,142 68,142" fill="#c9430b"></polygon>
+  <polygon points="86,104 96,110 86,116" fill="#161311"></polygon>
+  <polygon points="114,104 104,110 114,116" fill="#161311"></polygon>
+</svg>
