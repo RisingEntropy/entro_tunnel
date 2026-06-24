@@ -11,9 +11,9 @@ android {
     compileSdk = 35
     // Pin to the NDK actually installed in the SDK. Without this, AGP looks for
     // its built-in default NDK version and fails with "NDK is not installed"
-    // even though a (differently-versioned) NDK is present. Update this string
-    // if you install a different NDK (SDK Manager → SDK Tools → NDK).
-    ndkVersion = "30.0.14904198"
+    // even though a (differently-versioned) NDK is present. CI overrides this via
+    // ANDROID_NDK_VERSION; local builds fall back to whatever you have installed.
+    ndkVersion = System.getenv("ANDROID_NDK_VERSION") ?: "30.0.14904198"
 
     defaultConfig {
         applicationId = "com.entrotunnel.android"
