@@ -93,6 +93,9 @@ export interface Status {
   error?: string | null;
   // Other VPN members on this server (only when connected as a VPN member).
   peers?: Peer[];
+  // Payload bytes for the current desktop session.
+  up_bytes?: number;
+  down_bytes?: number;
 }
 
 export const MODE_LABEL: Record<Mode, string> = {

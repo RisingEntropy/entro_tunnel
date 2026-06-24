@@ -3,7 +3,7 @@
 # at the repo root. Path-depends on the shared engine crates.
 [package]
 name = "entrotunnel-app"
-version = "0.2.2"
+version = "0.2.4"
 edition = "2021"
 
 [[bin]]

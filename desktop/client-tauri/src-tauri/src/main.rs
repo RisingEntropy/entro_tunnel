@@ -38,7 +38,10 @@ struct LogTeeWriter {
 impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogTee {
     type Writer = LogTeeWriter;
     fn make_writer(&'a self) -> Self::Writer {
-        LogTeeWriter { buf: self.buf.clone(), acc: Vec::new() }
+        LogTeeWriter {
+            buf: self.buf.clone(),
+            acc: Vec::new(),
+        }
     }
 }
 impl std::io::Write for LogTeeWriter {
@@ -92,6 +95,10 @@ struct Status {
     /// VPN peers on the same server (empty unless connected in VPN mode). Filled
     /// live by the `status` command from the engine's shared state.
     peers: Vec<Peer>,
+    /// Payload bytes sent from this desktop client during the current session.
+    up_bytes: u64,
+    /// Payload bytes received by this desktop client during the current session.
+    down_bytes: u64,
 }
 
 /// One VPN peer shown in the GUI: its virtual IP and friendly name.
@@ -263,9 +270,19 @@ fn export_profile_toml(state: tauri::State<AppState>, name: String) -> Result<To
     // Filesystem-safe filename from the profile name.
     let safe: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
-    let safe = if safe.is_empty() { "profile".to_string() } else { safe };
+    let safe = if safe.is_empty() {
+        "profile".to_string()
+    } else {
+        safe
+    };
     std::fs::create_dir_all(&state.config_dir).map_err(|e| e.to_string())?;
     let path = state.config_dir.join(format!("{safe}.toml"));
     std::fs::write(&path, &toml).map_err(|e| e.to_string())?;
@@ -383,13 +400,14 @@ async fn relaunch_elevated(app: tauri::AppHandle) -> Result<(), String> {
         .to_string();
 
     // The auth/UAC dialog blocks, so run it off the async runtime.
-    let launched =
-        tauri::async_runtime::spawn_blocking(move || elevate_relaunch(&exe_s, &dir_s))
-            .await
-            .map_err(|e| e.to_string())?;
+    let launched = tauri::async_runtime::spawn_blocking(move || elevate_relaunch(&exe_s, &dir_s))
+        .await
+        .map_err(|e| e.to_string())?;
     launched?; // Err = the user cancelled the dialog → keep this instance running
 
-    app.state::<AppState>().quitting.store(true, Ordering::SeqCst);
+    app.state::<AppState>()
+        .quitting
+        .store(true, Ordering::SeqCst);
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
@@ -560,7 +578,11 @@ async fn connect_profile(state: tauri::State<'_, AppState>, name: String) -> Res
         };
         // The classic macOS/Linux case: utun/tun needs elevated privileges.
         let low = msg.to_lowercase();
-        if needs_tun && (low.contains("not permitted") || low.contains("denied") || low.contains("permission")) {
+        if needs_tun
+            && (low.contains("not permitted")
+                || low.contains("denied")
+                || low.contains("permission"))
+        {
             msg = format!(
                 "{msg} — Global proxy / VPN create a virtual NIC and need administrator/root. \
                  Run the app elevated, or switch to System proxy mode (no admin needed)."
@@ -573,6 +595,8 @@ async fn connect_profile(state: tauri::State<'_, AppState>, name: String) -> Res
             mode: Some(mode),
             error: Some(msg.clone()),
             peers: Vec::new(),
+            up_bytes: 0,
+            down_bytes: 0,
         };
         return Err(msg);
     }
@@ -587,6 +611,8 @@ async fn connect_profile(state: tauri::State<'_, AppState>, name: String) -> Res
         mode: Some(mode),
         error: None,
         peers: Vec::new(),
+        up_bytes: 0,
+        down_bytes: 0,
     };
     Ok(())
 }
@@ -623,9 +649,10 @@ async fn ping_server(
         .cloned()
         .or_else(|| p.active_server().ok())
         .ok_or_else(|| format!("server '{server}' not found"))?;
-    let rtt = entrotunnel_client::latency::measure_latency(&entry, std::time::Duration::from_secs(5))
-        .await
-        .map_err(|e| e.to_string())?;
+    let rtt =
+        entrotunnel_client::latency::measure_latency(&entry, std::time::Duration::from_secs(5))
+            .await
+            .map_err(|e| e.to_string())?;
     Ok(rtt.as_millis() as u64)
 }
 
@@ -634,14 +661,14 @@ fn status(state: tauri::State<AppState>) -> Status {
     // Read engine-side info first and drop the engine lock before locking status,
     // so we never hold both at once (all other paths lock engine before status —
     // keeping one global order avoids any lock-inversion deadlock).
-    let (alive, assigned_ip, peers) = {
+    let (alive, assigned_ip, peers, up_bytes, down_bytes) = {
         let eng = state.engine.lock().unwrap();
         match eng.as_ref() {
             Some(h) => {
                 let alive = !h.task.is_finished();
                 // Live info the engine reports back: the real server-assigned IP
                 // and the current VPN peer list (only set when a VPN member).
-                let (ip, peers) = h
+                let (ip, peers, up, down) = h
                     .shared
                     .lock()
                     .map(|live| {
@@ -649,14 +676,17 @@ fn status(state: tauri::State<AppState>) -> Status {
                         let peers = live
                             .peers
                             .iter()
-                            .map(|p| Peer { ip: p.ip.to_string(), name: p.name.clone() })
+                            .map(|p| Peer {
+                                ip: p.ip.to_string(),
+                                name: p.name.clone(),
+                            })
                             .collect::<Vec<_>>();
-                        (ip, peers)
+                        (ip, peers, live.up_bytes, live.down_bytes)
                     })
-                    .unwrap_or((None, Vec::new()));
-                (alive, ip, peers)
+                    .unwrap_or((None, Vec::new(), 0, 0));
+                (alive, ip, peers, up, down)
             }
-            None => (false, None, Vec::new()),
+            None => (false, None, Vec::new(), 0, 0),
         }
     };
 
@@ -666,6 +696,8 @@ fn status(state: tauri::State<AppState>) -> Status {
         s.assigned_ip = assigned_ip;
     }
     s.peers = peers;
+    s.up_bytes = up_bytes;
+    s.down_bytes = down_bytes;
     s
 }
 
@@ -692,7 +724,9 @@ fn show_main(app: &AppHandle) {
 /// stop the engine so its TUN/route/system-proxy guards restore the OS state,
 /// then exit the process.
 fn quit_app(app: &AppHandle) {
-    app.state::<AppState>().quitting.store(true, Ordering::SeqCst);
+    app.state::<AppState>()
+        .quitting
+        .store(true, Ordering::SeqCst);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let handle = { app.state::<AppState>().engine.lock().unwrap().take() };
@@ -775,7 +809,12 @@ fn main() {
         // tray's "Quit" (which sets `quitting`) actually exits.
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                if !window.app_handle().state::<AppState>().quitting.load(Ordering::SeqCst) {
+                if !window
+                    .app_handle()
+                    .state::<AppState>()
+                    .quitting
+                    .load(Ordering::SeqCst)
+                {
                     let _ = window.hide();
                     api.prevent_close();
                 }

@@ -26,11 +26,35 @@ pub struct LiveStatus {
     pub assigned_ip: Option<Ipv4Addr>,
     /// VPN peers currently on the server (refreshed periodically; VPN mode only).
     pub peers: Vec<PeerInfo>,
+    /// Payload bytes sent from this client toward the tunnel/server.
+    pub up_bytes: u64,
+    /// Payload bytes received from the tunnel/server by this client.
+    pub down_bytes: u64,
 }
 
 /// Shared handle to [`LiveStatus`]. A plain `std::sync::Mutex` is fine: every
 /// lock is a brief field read/write with no `.await` held across it.
 pub type SharedStatus = Arc<Mutex<LiveStatus>>;
+
+#[inline]
+pub(crate) fn add_traffic_up(shared: &SharedStatus, n: usize) {
+    if n == 0 {
+        return;
+    }
+    if let Ok(mut s) = shared.lock() {
+        s.up_bytes = s.up_bytes.saturating_add(n as u64);
+    }
+}
+
+#[inline]
+pub(crate) fn add_traffic_down(shared: &SharedStatus, n: usize) {
+    if n == 0 {
+        return;
+    }
+    if let Ok(mut s) = shared.lock() {
+        s.down_bytes = s.down_bytes.saturating_add(n as u64);
+    }
+}
 
 /// Stateless entry point for running the client.
 pub struct Engine;
@@ -162,7 +186,10 @@ async fn run_session(
     let member = matches!(cfg.mode, SessionMode::Vpn) || cfg.join_vpn;
     match cfg.mode {
         SessionMode::GlobalProxy | SessionMode::Vpn => {
-            run_packet_mode(&cfg, welcome, writer, reader, server_ip, member, shared, cancel).await
+            run_packet_mode(
+                &cfg, welcome, writer, reader, server_ip, member, shared, cancel,
+            )
+            .await
         }
         SessionMode::HttpProxy => {
             crate::proxy::run_http_mode(&cfg, welcome, writer, reader, member, shared, cancel).await
@@ -223,7 +250,17 @@ async fn run_chain_session(
     // is the first-hop connection's job above.
     match final_mode {
         SessionMode::GlobalProxy => {
-            run_packet_mode(&cfg, welcome, writer, reader, first_hop_ip, false, shared, cancel).await
+            run_packet_mode(
+                &cfg,
+                welcome,
+                writer,
+                reader,
+                first_hop_ip,
+                false,
+                shared,
+                cancel,
+            )
+            .await
         }
         SessionMode::HttpProxy => {
             crate::proxy::run_http_mode(&cfg, welcome, writer, reader, false, shared, cancel).await
@@ -288,6 +325,7 @@ async fn run_packet_mode(
     // Uplink: TUN → server (with keepalive).
     let tun_up = tun.clone();
     let cancel_up = cancel.clone();
+    let shared_up = shared.clone();
     let uplink = tokio::spawn(async move {
         let mut buf = vec![0u8; read_buf_len];
         let mut keepalive = tokio::time::interval(Duration::from_secs(KEEPALIVE_SECS));
@@ -309,6 +347,7 @@ async fn run_packet_mode(
                 r = tun_up.recv(&mut buf) => match r {
                     Ok(n) if n > 0 => {
                         if writer.send(&Frame::Packet(buf[..n].to_vec())).await.is_err() { break; }
+                        add_traffic_up(&shared_up, n);
                     }
                     Ok(_) => {}
                     Err(e) => { tracing::debug!("tun recv: {e}"); break; }
@@ -327,7 +366,11 @@ async fn run_packet_mode(
             tokio::select! {
                 _ = cancel_down.cancelled() => break,
                 f = reader.recv() => match f {
-                    Ok(Frame::Packet(pkt)) => { let _ = tun_down.send(&pkt).await; }
+                    Ok(Frame::Packet(pkt)) => {
+                        let n = pkt.len();
+                        let _ = tun_down.send(&pkt).await;
+                        add_traffic_down(&shared_down, n);
+                    }
                     Ok(Frame::Ping | Frame::Pong) => {}
                     Ok(Frame::PeerList { peers }) => {
                         if let Ok(mut s) = shared_down.lock() { s.peers = peers; }

@@ -6,7 +6,7 @@
 //! dials the target and pumps bytes back.
 
 use crate::config::ClientConfig;
-use crate::engine::{SharedStatus, PEER_REFRESH_SECS};
+use crate::engine::{add_traffic_down, add_traffic_up, SharedStatus, PEER_REFRESH_SECS};
 use crate::tun::{TunConfig, TunDevice};
 use entrotunnel_core::protocol::{Frame, FrameReader, FrameWriter, TargetAddr, Welcome};
 use entrotunnel_core::{Error, Result, KEEPALIVE_SECS};
@@ -107,7 +107,7 @@ pub async fn run_http_mode(
         tun = Some(dev);
     }
 
-    let writer_task = tokio::spawn(writer_loop(writer, out_rx, cancel.clone()));
+    let writer_task = tokio::spawn(writer_loop(writer, out_rx, shared.clone(), cancel.clone()));
     let reader_task = tokio::spawn(reader_loop(
         reader,
         streams.clone(),
@@ -143,7 +143,12 @@ pub async fn run_http_mode(
 }
 
 /// Single owner of the FrameWriter: drains queued frames + sends keepalives.
-async fn writer_loop(mut writer: FrameWriter, mut out_rx: mpsc::Receiver<Frame>, cancel: CancellationToken) {
+async fn writer_loop(
+    mut writer: FrameWriter,
+    mut out_rx: mpsc::Receiver<Frame>,
+    shared: SharedStatus,
+    cancel: CancellationToken,
+) {
     let mut keepalive = tokio::time::interval(Duration::from_secs(KEEPALIVE_SECS));
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -151,7 +156,15 @@ async fn writer_loop(mut writer: FrameWriter, mut out_rx: mpsc::Receiver<Frame>,
             _ = cancel.cancelled() => break,
             _ = keepalive.tick() => { if writer.send(&Frame::Ping).await.is_err() { break; } }
             frame = out_rx.recv() => match frame {
-                Some(f) => { if writer.send(&f).await.is_err() { break; } }
+                Some(f) => {
+                    let n = match &f {
+                        Frame::Packet(p) => p.len(),
+                        Frame::StreamData { data, .. } => data.len(),
+                        _ => 0,
+                    };
+                    if writer.send(&f).await.is_err() { break; }
+                    add_traffic_up(&shared, n);
+                }
                 None => break,
             }
         }
@@ -175,10 +188,12 @@ async fn reader_loop(
             _ = cancel.cancelled() => break,
             frame = reader.recv() => match frame {
                 Ok(Frame::StreamData { id, data }) => {
+                    let n = data.len();
                     let tx = streams.lock().unwrap().get(&id).cloned();
                     if let Some(tx) = tx {
                         let _ = tx.send(ToLocal::Data(data)).await;
                     }
+                    add_traffic_down(&shared, n);
                 }
                 Ok(Frame::StreamClose { id, .. }) => {
                     let tx = streams.lock().unwrap().remove(&id);
@@ -189,7 +204,9 @@ async fn reader_loop(
                 Ok(Frame::Ping) => { let _ = out_tx.send(Frame::Pong).await; }
                 // VPN peer LAN (only present when joined): packets to the TUN.
                 Ok(Frame::Packet(pkt)) => {
+                    let n = pkt.len();
                     if let Some(t) = &tun { let _ = t.send(&pkt).await; }
+                    add_traffic_down(&shared, n);
                 }
                 Ok(Frame::PeerList { peers }) => {
                     if let Ok(mut s) = shared.lock() { s.peers = peers; }
@@ -201,7 +218,12 @@ async fn reader_loop(
     }
 }
 
-async fn handle_local(mut sock: TcpStream, id: u32, out: mpsc::Sender<Frame>, streams: StreamMap) -> Result<()> {
+async fn handle_local(
+    mut sock: TcpStream,
+    id: u32,
+    out: mpsc::Sender<Frame>,
+    streams: StreamMap,
+) -> Result<()> {
     let (target, is_connect, forward) = parse_http_head(&mut sock).await?;
 
     let (to_local_tx, mut to_local_rx) = mpsc::channel::<ToLocal>(256);
@@ -212,7 +234,8 @@ async fn handle_local(mut sock: TcpStream, id: u32, out: mpsc::Sender<Frame>, st
         .map_err(|_| Error::Closed)?;
 
     if is_connect {
-        sock.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
+        sock.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await?;
     } else if !forward.is_empty() {
         // Plain HTTP: forward the request head/body we already consumed.
         out.send(Frame::StreamData { id, data: forward })
@@ -230,7 +253,14 @@ async fn handle_local(mut sock: TcpStream, id: u32, out: mpsc::Sender<Frame>, st
             match rd.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(n) => {
-                    if out_up.send(Frame::StreamData { id, data: buf[..n].to_vec() }).await.is_err() {
+                    if out_up
+                        .send(Frame::StreamData {
+                            id,
+                            data: buf[..n].to_vec(),
+                        })
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -310,7 +340,9 @@ fn parse_request_line(head: &[u8]) -> Result<(TargetAddr, bool)> {
             .unwrap_or_default()
     };
     if host_port.is_empty() {
-        return Err(Error::Protocol(format!("cannot parse proxy target: {first:?}")));
+        return Err(Error::Protocol(format!(
+            "cannot parse proxy target: {first:?}"
+        )));
     }
     let (h, p) = split_host_port(&host_port, 80);
     Ok((TargetAddr::Domain(h, p), false))
