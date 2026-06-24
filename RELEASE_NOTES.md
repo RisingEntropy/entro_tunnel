@@ -68,10 +68,9 @@ Rules accept domains (resolved at connect time) or IP / CIDR.
 - **macOS** (Apple Silicon + Intel, universal) — `.dmg`
 - **Windows** — `.msi` / NSIS `.exe`
 - **Linux** — `.deb` / `.AppImage`
-- **Android** — debug-signed `.apk` (`entrotunnel-android-debug.apk`)
 - **Server + CLI** binaries for macOS / Windows / Linux
 
-These are **unsigned** builds. On macOS, right-click the app → **Open** the first time (or `xattr -dr com.apple.quarantine /Applications/EntroTunnel.app`). The Android APK is debug-signed, so allow "install from unknown sources". TUN modes need admin / Touch-ID elevation.
+These are **unsigned** builds. On macOS, right-click the app → **Open** the first time (or `xattr -dr com.apple.quarantine /Applications/EntroTunnel.app`). TUN modes need admin / Touch-ID elevation. (The Android client builds from source — see the README.)
 
 ## Notes & limitations
 - Per-OS runtime support differs (Linux is the gold path for TUN/VPN; Windows TUN routing is in progress) — see the README matrix.

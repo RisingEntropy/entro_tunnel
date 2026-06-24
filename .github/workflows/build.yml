@@ -128,63 +128,11 @@ jobs:
           path: dist/*
 
   # ------------------------------------------------------------------
-  # Android APK (Jetpack Compose + JNI Rust core). Debug-signed so it
-  # installs without a keystore; the rust-android-gradle plugin
-  # cross-compiles libentrotunnel_jni.so for arm64-v8a / armeabi-v7a / x86_64.
-  # ------------------------------------------------------------------
-  android:
-    runs-on: ubuntu-22.04
-    env:
-      # CI installs and pins this NDK (AGP 8.5's default — always available via
-      # sdkmanager). build.gradle.kts reads ANDROID_NDK_VERSION.
-      ANDROID_NDK_VERSION: "26.1.10909125"
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - uses: android-actions/setup-android@v3
-
-      - name: Install NDK
-        run: sdkmanager "ndk;${ANDROID_NDK_VERSION}"
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "mobile/android/rust -> target"
-
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.9"
-
-      - name: Build debug APK
-        working-directory: mobile/android
-        run: gradle :app:assembleDebug --no-daemon --stacktrace
-
-      - name: Stage APK
-        run: |
-          mkdir -p dist
-          cp mobile/android/app/build/outputs/apk/debug/*.apk dist/entrotunnel-android-debug.apk
-          ls -la dist
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: entrotunnel-android
-          if-no-files-found: error
-          path: dist/*.apk
-
-  # ------------------------------------------------------------------
   # On a tag: collect every artifact into one GitHub Release.
   # Runs even if some matrix legs failed, so a partial release still ships.
   # ------------------------------------------------------------------
   release:
-    needs: [desktop, cli-server, android]
+    needs: [desktop, cli-server]
     if: ${{ always() && startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     steps:
