@@ -877,7 +877,7 @@ checksum = "4ef6b89e5b37196644d8796de5268852ff179b44e96276cf4290264843743bb7"
 
 [[package]]
 name = "entrotunnel-app"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "entrotunnel-client",
  "entrotunnel-core",
@@ -894,7 +894,7 @@ dependencies = [
 
 [[package]]
 name = "entrotunnel-client"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -913,7 +913,7 @@ dependencies = [
 
 [[package]]
 name = "entrotunnel-core"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

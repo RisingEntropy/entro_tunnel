@@ -119,21 +119,21 @@ h1, h2, h3, p { margin: 0; font-weight: 600; }
 ::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); background-clip: padding-box; }
 
 /* ------------------------------------------------------------------ shell */
-.app-shell { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; }
+.app-shell { display: grid; grid-template-columns: 250px minmax(0, 1fr); min-height: 100vh; }
 .sidebar {
   height: 100vh;
   position: sticky;
   top: 0;
   background: var(--side);
   border-right: 1px solid var(--line);
-  padding: 16px 12px;
+  padding: 18px 14px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
-.brand { display: flex; align-items: center; gap: 11px; padding: 6px 8px 14px; }
-.brand .logo { width: 30px; height: 30px; border-radius: 9px; }
-.brand h1 { font-size: 14.5px; font-weight: 650; letter-spacing: .1px; }
+.brand { display: flex; align-items: center; gap: 12px; padding: 6px 8px 16px; }
+.brand .logo { width: 36px; height: 36px; border-radius: 10px; flex: none; }
+.brand h1 { font-size: 16px; font-weight: 700; letter-spacing: .1px; }
 .brand span { display: block; color: var(--faint); font-size: 11px; font-weight: 400; margin-top: 1px; }
 .nav { display: flex; flex-direction: column; gap: 3px; }
 .nav button {
@@ -164,12 +164,14 @@ h1, h2, h3, p { margin: 0; font-weight: 600; }
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--surface-1);
-  padding: 11px 12px;
+  padding: 12px 13px;
 }
 .side-row, .speed-pair, .status-chip { display: flex; align-items: center; }
-.side-row { justify-content: space-between; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
-.speed-pair { justify-content: space-between; gap: 8px; color: var(--muted); font-size: 11px; margin-top: 8px; }
-.speed-pair span { display: inline-flex; align-items: center; gap: 4px; }
+.side-row { justify-content: space-between; color: var(--muted); font-size: 11.5px; font-weight: 500; letter-spacing: .2px; text-transform: uppercase; margin-bottom: 9px; }
+.speed-pair { justify-content: space-between; gap: 8px; color: var(--text); font-size: 12px; font-weight: 600; margin-top: 10px; }
+.speed-pair span { display: inline-flex; align-items: center; gap: 5px; }
+.speed-pair span:first-child svg { color: var(--accent); }
+.speed-pair span:last-child svg { color: var(--cyan); }
 .status-chip { gap: 10px; }
 .status-chip b { display: block; font-size: 12.5px; font-weight: 600; }
 .status-chip small { display: block; max-width: 150px; color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -247,9 +249,9 @@ select {
 .chart-line.down { stroke: var(--cyan); }
 .chart-line.up { stroke: var(--accent); }
 .chart-empty { height: 206px; display: grid; place-items: center; color: var(--faint); font-size: 13px; border: 1px dashed var(--line); border-radius: 12px; }
-.mini-chart { width: 100%; height: 46px; display: block; }
+.mini-chart { width: 100%; height: 62px; display: block; }
 .mini-chart .chart-line { stroke-width: 2.2; }
-.mini-chart.empty { border-radius: 9px; background: var(--surface-1); }
+.mini-chart.empty { height: 62px; border-radius: 9px; background: var(--input-bg); border: 1px dashed var(--line); }
 .metric-grid { display: grid; gap: 10px; margin-top: 14px; }
 .metric-grid.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .metric-card { display: flex; gap: 10px; align-items: center; padding: 11px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-1); }
@@ -393,13 +395,10 @@ button.server-card { cursor: pointer; }
 code { background: var(--code-bg); border-radius: 5px; padding: 1px 6px; font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
 
 /* ---------------------------------------------------------- responsive */
-@media (max-width: 1060px) {
-  .app-shell { grid-template-columns: 76px minmax(0, 1fr); }
-  .brand div, .nav span, .side-traffic, .status-chip small, .status-chip b, .theme-toggle span { display: none; }
-  .brand { justify-content: center; }
-  .nav button { justify-content: center; padding: 11px; }
-  .theme-toggle { justify-content: center; }
-  .status-chip { justify-content: center; }
+/* Keep the full sidebar (logo + name + nav labels + traffic curve) at all but
+   the narrowest widths — Clash-Verge-style. Below, only reflow the content. */
+@media (max-width: 1120px) {
+  .app-shell { grid-template-columns: 230px minmax(0, 1fr); }
   .dashboard-grid, .connection-layout, .settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .span-3 { grid-column: span 2; }
   .connect-panel { flex-direction: column; align-items: stretch; }
@@ -409,6 +408,7 @@ code { background: var(--code-bg); border-radius: 5px; padding: 1px 6px; font-fa
 @media (max-width: 760px) {
   .app-shell { display: block; }
   .sidebar { position: relative; height: auto; }
+  .sidebar-fill { display: none; }
   .nav { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .main-pane { padding: 18px; }
   .dashboard-grid, .connection-layout, .settings-grid, .metric-grid.four { grid-template-columns: 1fr; }
