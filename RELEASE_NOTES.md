@@ -1,5 +1,10 @@
 A self-hosted, end-to-end-encrypted VPN / proxy written in Rust. One engine powers a **server** (with a web admin panel), a **desktop GUI** (Tauri — macOS / Windows / Linux), a **CLI**, and an **Android** client. No plaintext anywhere — you run every hop yourself.
 
+## What's new in v1.2
+- 🐛 **Server reliability fix** — connection handshakes now run *off* the accept loop under a timeout. Previously one peer that stalled mid-handshake (a dropped client, a port scanner, a cloud/GFW probe) could wedge the listener: the process stayed up but stopped accepting new connections. Fixed for all transports (TCP / WS / QUIC).
+- 🎨 **Desktop UI overhaul** — light / dark themes with a sidebar toggle (persisted, follows system preference); a fuller Clash-Verge-style sidebar with logo, name, and a live traffic curve; proper [Lucide](https://lucide.dev) icons; refined typography, cards, and switches.
+- 🚦 **Latency colouring by threshold** — green < 250 ms, amber 250–500 ms, red > 500 ms (and timeouts).
+
 ## Highlights
 - 🔗 **Multi-hop proxy chain** — relay through several of your own servers
 - 🌐 **Full-tunnel IPv6 (NAT66)** + DNS over the tunnel
