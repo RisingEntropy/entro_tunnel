@@ -57,13 +57,35 @@ impl TcpNoiseListener {
         })
     }
 
-    pub async fn accept(&self) -> Result<Accepted> {
-        let (mut stream, peer_addr) = self.inner.accept().await?;
+    /// Pull the next pending TCP connection. Only the (fast) kernel accept runs
+    /// here — the Noise handshake is deferred to [`TcpIncoming::finish`] so it
+    /// never blocks the accept loop.
+    pub async fn accept(&self) -> Result<TcpIncoming> {
+        let (stream, peer_addr) = self.inner.accept().await?;
         stream.set_nodelay(true).ok();
-        let ts = noise::responder_handshake(&mut stream, &self.sec.noise_psk).await?;
-        let (sink, recv) = wrap(stream, ts);
-        Ok(Accepted {
+        Ok(TcpIncoming {
+            stream,
             peer_addr,
+            sec: self.sec.clone(),
+        })
+    }
+}
+
+/// A TCP connection accepted but not yet through the Noise responder handshake.
+pub struct TcpIncoming {
+    stream: TcpStream,
+    peer_addr: SocketAddr,
+    sec: Arc<ServerSecurity>,
+}
+
+impl TcpIncoming {
+    /// Run the Noise responder handshake. Drive this off the accept loop, under a
+    /// timeout, so a peer that stalls mid-handshake can't wedge the listener.
+    pub async fn finish(mut self) -> Result<Accepted> {
+        let ts = noise::responder_handshake(&mut self.stream, &self.sec.noise_psk).await?;
+        let (sink, recv) = wrap(self.stream, ts);
+        Ok(Accepted {
+            peer_addr: self.peer_addr,
             sink,
             stream: recv,
         })

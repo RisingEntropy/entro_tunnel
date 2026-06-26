@@ -141,25 +141,48 @@ impl WsListener {
         })
     }
 
-    pub async fn accept(&self) -> Result<Accepted> {
+    /// Pull the next pending TCP connection. Only the (fast) kernel accept runs
+    /// here — the TLS + WebSocket upgrade is deferred to [`WsIncoming::finish`]
+    /// so it never blocks the accept loop.
+    pub async fn accept(&self) -> Result<WsIncoming> {
         let (tcp, peer_addr) = self.inner.accept().await?;
         tcp.set_nodelay(true).ok();
-        let (sink, stream) = match &self.acceptor {
+        Ok(WsIncoming {
+            tcp,
+            peer_addr,
+            acceptor: self.acceptor.clone(),
+        })
+    }
+}
+
+/// A TCP connection accepted but not yet through the TLS + WebSocket upgrade.
+pub struct WsIncoming {
+    tcp: TcpStream,
+    peer_addr: SocketAddr,
+    acceptor: Option<TlsAcceptor>,
+}
+
+impl WsIncoming {
+    /// Terminate TLS (for WSS) and complete the WebSocket upgrade. Drive this off
+    /// the accept loop, under a timeout, so a stalled peer can't wedge new
+    /// connections.
+    pub async fn finish(self) -> Result<Accepted> {
+        let (sink, stream) = match self.acceptor {
             Some(acceptor) => {
                 let tls = acceptor
-                    .accept(tcp)
+                    .accept(self.tcp)
                     .await
                     .map_err(|e| Error::Crypto(format!("tls accept: {e}")))?;
                 let ws = tokio_tungstenite::accept_async(tls).await.map_err(ws_err)?;
                 split(ws)
             }
             None => {
-                let ws = tokio_tungstenite::accept_async(tcp).await.map_err(ws_err)?;
+                let ws = tokio_tungstenite::accept_async(self.tcp).await.map_err(ws_err)?;
                 split(ws)
             }
         };
         Ok(Accepted {
-            peer_addr,
+            peer_addr: self.peer_addr,
             sink,
             stream,
         })

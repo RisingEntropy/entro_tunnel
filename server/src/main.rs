@@ -134,11 +134,28 @@ async fn run(config_path: PathBuf) -> Result<()> {
                     info!(%addr, transport = %kind, "listening");
                     loop {
                         match listener.accept().await {
-                            Ok(accepted) => {
+                            Ok(incoming) => {
                                 let s = st.clone();
-                                tokio::spawn(handle_connection(s, accepted));
+                                // Run the handshake OFF the accept loop, under a
+                                // timeout. A peer that finishes the TCP/UDP
+                                // handshake but stalls the encryption handshake
+                                // (dropped client, port scanner, cloud/GFW probe)
+                                // can otherwise wedge the listener indefinitely —
+                                // the process keeps running but stops accepting.
+                                tokio::spawn(async move {
+                                    let deadline = std::time::Duration::from_secs(15);
+                                    match tokio::time::timeout(deadline, incoming.finish()).await {
+                                        Ok(Ok(accepted)) => handle_connection(s, accepted).await,
+                                        Ok(Err(e)) => {
+                                            tracing::debug!(%addr, "handshake failed: {e}")
+                                        }
+                                        Err(_) => {
+                                            tracing::debug!(%addr, "handshake timed out after 15s")
+                                        }
+                                    }
+                                });
                             }
-                            Err(e) => tracing::debug!(%addr, "accept/handshake failed: {e}"),
+                            Err(e) => tracing::debug!(%addr, "accept failed: {e}"),
                         }
                     }
                 }

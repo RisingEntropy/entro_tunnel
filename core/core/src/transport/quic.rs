@@ -136,13 +136,35 @@ impl QuicListener {
         Ok(Self { endpoint })
     }
 
-    pub async fn accept(&self) -> Result<Accepted> {
+    /// Pull the next incoming QUIC connection attempt. The handshake is *not*
+    /// driven here — that is deferred to [`QuicIncoming::finish`] so it never
+    /// blocks the accept loop.
+    pub async fn accept(&self) -> Result<QuicIncoming> {
         let incoming = self
             .endpoint
             .accept()
             .await
             .ok_or_else(|| Error::Transport("quic endpoint closed".into()))?;
-        let conn = incoming
+        Ok(QuicIncoming {
+            incoming,
+            endpoint: self.endpoint.clone(),
+        })
+    }
+}
+
+/// A QUIC connection attempt whose handshake has not been driven yet.
+pub struct QuicIncoming {
+    incoming: quinn::Incoming,
+    endpoint: quinn::Endpoint,
+}
+
+impl QuicIncoming {
+    /// Drive the QUIC handshake and accept the client's first bi-stream. Run off
+    /// the accept loop, under a timeout, so a stalled peer can't wedge new
+    /// connections.
+    pub async fn finish(self) -> Result<Accepted> {
+        let conn = self
+            .incoming
             .await
             .map_err(|e| Error::Transport(format!("quic accept: {e}")))?;
         let peer_addr = conn.remote_address();
@@ -150,7 +172,7 @@ impl QuicListener {
             .accept_bi()
             .await
             .map_err(|e| Error::Transport(format!("quic accept_bi: {e}")))?;
-        let (sink, stream) = wrap(self.endpoint.clone(), conn, send, recv);
+        let (sink, stream) = wrap(self.endpoint, conn, send, recv);
         Ok(Accepted {
             peer_addr,
             sink,

@@ -70,11 +70,42 @@ pub struct ServerSecurity {
     pub tls_key_pem: String,
 }
 
-/// A freshly accepted server-side connection.
+/// A freshly accepted server-side connection (handshake already done).
 pub struct Accepted {
     pub peer_addr: SocketAddr,
     pub sink: BoxSink,
     pub stream: BoxStream,
+}
+
+/// A pending server-side connection whose encryption handshake has NOT run yet.
+/// [`Listener::accept`] returns this after only the cheap kernel-level accept;
+/// run [`Incoming::finish`] — *off* the accept loop and under a timeout — to
+/// perform the (blocking) handshake, so a peer that stalls mid-handshake can
+/// never wedge the listener.
+pub enum Incoming {
+    #[cfg(feature = "tcp")]
+    Tcp(tcp::TcpIncoming),
+    #[cfg(feature = "ws")]
+    Ws(ws::WsIncoming),
+    #[cfg(feature = "quic")]
+    Quic(quic::QuicIncoming),
+}
+
+impl Incoming {
+    /// Complete the transport's encryption handshake. Run this off the accept
+    /// loop, wrapped in a timeout.
+    pub async fn finish(self) -> Result<Accepted> {
+        match self {
+            #[cfg(feature = "tcp")]
+            Incoming::Tcp(i) => i.finish().await,
+            #[cfg(feature = "ws")]
+            Incoming::Ws(i) => i.finish().await,
+            #[cfg(feature = "quic")]
+            Incoming::Quic(i) => i.finish().await,
+            #[allow(unreachable_patterns)]
+            _ => Err(Error::NotImplemented("no transport features enabled")),
+        }
+    }
 }
 
 /// Dial a server, performing the transport's encryption handshake.
@@ -217,14 +248,17 @@ impl Listener {
         }
     }
 
-    pub async fn accept(&self) -> Result<Accepted> {
+    /// Pull the next pending connection. This does only the fast kernel-level
+    /// accept — NOT the handshake — so the accept loop never blocks on a slow or
+    /// stalled peer. Run [`Incoming::finish`] off the loop, under a timeout.
+    pub async fn accept(&self) -> Result<Incoming> {
         match self {
             #[cfg(feature = "tcp")]
-            Listener::Tcp(l) => l.accept().await,
+            Listener::Tcp(l) => Ok(Incoming::Tcp(l.accept().await?)),
             #[cfg(feature = "ws")]
-            Listener::Ws(l) => l.accept().await,
+            Listener::Ws(l) => Ok(Incoming::Ws(l.accept().await?)),
             #[cfg(feature = "quic")]
-            Listener::Quic(l) => l.accept().await,
+            Listener::Quic(l) => Ok(Incoming::Quic(l.accept().await?)),
             #[allow(unreachable_patterns)]
             _ => Err(Error::NotImplemented("no transport features enabled")),
         }
