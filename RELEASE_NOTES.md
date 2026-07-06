@@ -1,5 +1,8 @@
 A self-hosted, end-to-end-encrypted VPN / proxy written in Rust. One engine powers a **server** (with a web admin panel), a **desktop GUI** (Tauri — macOS / Windows / Linux), a **CLI**, and an **Android** client. No plaintext anywhere — you run every hop yourself.
 
+## What's new in v1.2.1
+- 🪟 **Windows TUN fix** — the installer now bundles `wintun.dll` next to the executable, so Global-proxy / VPN (TUN) modes work out of the box instead of failing with `wintun.dll: LoadLibraryExW failed`.
+
 ## What's new in v1.2
 - 🐛 **Server reliability fix** — connection handshakes now run *off* the accept loop under a timeout. Previously one peer that stalled mid-handshake (a dropped client, a port scanner, a cloud/GFW probe) could wedge the listener: the process stayed up but stopped accepting new connections. Fixed for all transports (TCP / WS / QUIC).
 - 🎨 **Desktop UI overhaul** — light / dark themes with a sidebar toggle (persisted, follows system preference); a fuller Clash-Verge-style sidebar with logo, name, and a live traffic curve; proper [Lucide](https://lucide.dev) icons; refined typography, cards, and switches.
