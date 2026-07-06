@@ -69,6 +69,22 @@ jobs:
         working-directory: desktop/client-tauri
         run: yarn install --frozen-lockfile
 
+      # Wintun (WireGuard's userspace TUN driver) is required for Windows TUN
+      # modes. Fetch the official DLL at build time so tauri.windows.conf.json's
+      # `resources` bundles it next to the exe. Not committed to git.
+      - name: Fetch Wintun DLL (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = '0.14.1'
+          $zip = "$env:RUNNER_TEMP\wintun.zip"
+          Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-$ver.zip" -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP\wintun" -Force
+          $src = "$env:RUNNER_TEMP\wintun\wintun\bin\amd64\wintun.dll"
+          Write-Host "wintun.dll SHA256:" (Get-FileHash $src -Algorithm SHA256).Hash
+          Copy-Item $src -Destination "desktop/client-tauri/src-tauri/wintun.dll" -Force
+
       - name: Build desktop app
         uses: tauri-apps/tauri-action@v0
         env:

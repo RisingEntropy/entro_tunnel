@@ -319,6 +319,31 @@ mod imp {
     /// Wintun ring-buffer capacity (must be a power of two in [128 KiB, 64 MiB]).
     const RING_CAPACITY: u32 = 4 * 1024 * 1024;
 
+    /// Load `wintun.dll`. Prefer a copy shipped next to the running executable
+    /// (bundled with the desktop app / CLI), then a `resources\` subdir, then the
+    /// OS default search path (System32 / PATH). Windows does search the exe
+    /// directory by default, but installers may drop the DLL in a subfolder, so
+    /// we probe explicitly and, on failure, tell the user exactly what to do.
+    fn load_wintun() -> Result<wintun::Wintun> {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                for cand in [dir.join("wintun.dll"), dir.join("resources").join("wintun.dll")] {
+                    if cand.exists() {
+                        if let Ok(w) = unsafe { wintun::load_from_path(&cand) } {
+                            return Ok(w);
+                        }
+                    }
+                }
+            }
+        }
+        unsafe { wintun::load() }.map_err(|e| {
+            Error::Transport(format!(
+                "load wintun.dll: {e}. Put wintun.dll (amd64, from https://www.wintun.net) \
+                 next to the EntroTunnel executable."
+            ))
+        })
+    }
+
     /// A live Wintun adapter session. Wintun's receive is blocking, so a
     /// dedicated OS thread drains packets into a channel; `send` writes directly
     /// to the ring (non-blocking).
@@ -340,8 +365,7 @@ mod imp {
             // load, kernel adapter install/PnP, 4 MiB ring alloc) — keep them
             // off the async worker.
             tokio::task::spawn_blocking(move || {
-                let wintun = unsafe { wintun::load() }
-                    .map_err(|e| Error::Transport(format!("load wintun.dll: {e}")))?;
+                let wintun = load_wintun()?;
 
                 // Reuse an existing adapter of the same name, else create one.
                 let adapter = match wintun::Adapter::open(&wintun, &name) {

@@ -45,3 +45,6 @@ mobile/android/app/src/main/jniLibs/
 *.apk
 *.aab
 *.keystore
+
+# Windows TUN driver — fetched at build time in CI, never committed
+wintun.dll
