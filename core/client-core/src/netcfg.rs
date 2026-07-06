@@ -3,7 +3,8 @@
 //! * **Linux** — `iproute2` (`ip`). Robust and dependency-free (matters for the
 //!   Dockerized CLI test).
 //! * **macOS** — `ifconfig` + `route` (+ best-effort `/etc/resolv.conf`).
-//! * **Windows** — TODO(impl): `netsh`.
+//! * **Windows** — `netsh` + `route` (assigns the Wintun adapter's IP, installs
+//!   the split-default capture, sets DNS on the adapter).
 //!
 //! [`apply`] returns a [`NetGuard`]; dropping it restores the previous routing
 //! and DNS state (best-effort, synchronously).
@@ -256,7 +257,7 @@ pub async fn apply_vpn_lan(welcome: &Welcome, ifname: &str) -> Result<NetGuard> 
 
 /// Resolve a rule target to one or more IPv4 CIDR strings. Domains are resolved
 /// via the system resolver (IPv4 answers only); IPv6 targets are skipped.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 async fn resolve_rule_targets(target: &str) -> Vec<String> {
     use std::net::{Ipv4Addr, IpAddr};
     if let Ok(net) = target.parse::<ipnet::Ipv4Net>() {
@@ -658,23 +659,353 @@ async fn apply_route_rules(
 }
 
 // ----------------------------------------------------------------------------
-// Other platforms (Windows, …) — scaffold
+// Windows (Wintun) — `netsh` + `route`. Wintun gives us the adapter but not its
+// IP, so we assign it here, then install the same split-default capture the
+// other OSes use. DNS is set on the tun adapter (removed when it's torn down);
+// no /etc/resolv.conf. Compiles on Windows CI; runtime-tested by the user.
 // ----------------------------------------------------------------------------
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+async fn run(cmd: &str, args: &[&str]) -> Result<()> {
+    let out = tokio::process::Command::new(cmd)
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| Error::Transport(format!("spawn `{cmd}`: {e}")))?;
+    if !out.status.success() {
+        return Err(Error::Transport(format!(
+            "`{cmd} {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+async fn cmd_out(cmd: &str, args: &[&str]) -> Option<String> {
+    let out = tokio::process::Command::new(cmd).args(args).output().await.ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Dotted IPv4 netmask for a prefix length (24 → 255.255.255.0).
+#[cfg(target_os = "windows")]
+fn prefix_to_mask(prefix: u8) -> String {
+    let bits: u32 = if prefix == 0 {
+        0
+    } else if prefix >= 32 {
+        u32::MAX
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    std::net::Ipv4Addr::from(bits).to_string()
+}
+
+/// Split an IPv4 CIDR ("10.0.0.0/8") into (network, dotted-mask) for `route add`.
+#[cfg(target_os = "windows")]
+fn split_cidr(cidr: &str) -> Option<(String, String)> {
+    let net: ipnet::Ipv4Net = cidr.parse().ok()?;
+    Some((net.network().to_string(), net.netmask().to_string()))
+}
+
+/// The IPv4 interface index of adapter `name`, from
+/// `netsh interface ipv4 show interfaces` (columns: Idx Met MTU State Name…).
+#[cfg(target_os = "windows")]
+async fn if_index(name: &str) -> Option<u32> {
+    let out = cmd_out("netsh", &["interface", "ipv4", "show", "interfaces"]).await?;
+    for line in out.lines() {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 5 {
+            continue;
+        }
+        let Ok(idx) = cols[0].parse::<u32>() else { continue };
+        // The adapter name is the 5th column onward (it may contain spaces).
+        if cols[4..].join(" ") == name {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+/// The IPv4 default gateway, parsed from `route print -4 0.0.0.0`.
+#[cfg(target_os = "windows")]
+async fn default_gateway() -> Option<String> {
+    let out = cmd_out("route", &["print", "-4", "0.0.0.0"]).await?;
+    for line in out.lines() {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() >= 3 && cols[0] == "0.0.0.0" && cols[1] == "0.0.0.0" && cols[2] != "On-link" {
+            if cols[2].parse::<std::net::Ipv4Addr>().is_ok() {
+                return Some(cols[2].to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Assign the wintun adapter's IPv4 address + MTU. Wintun creates the adapter
+/// but doesn't address it; this also creates the on-link subnet route. Retries
+/// briefly because the adapter can take a moment to become addressable.
+#[cfg(target_os = "windows")]
+async fn set_adapter_ipv4(ifname: &str, ip: &str, mask: &str, mtu: &str) -> Result<()> {
+    let mut ok = false;
+    for _ in 0..10 {
+        if run(
+            "netsh",
+            &["interface", "ipv4", "set", "address", ifname, "static", ip, mask],
+        )
+        .await
+        .is_ok()
+        {
+            ok = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    if !ok {
+        return Err(Error::Transport(format!(
+            "could not assign {ip} {mask} to {ifname} via netsh"
+        )));
+    }
+    let mtu_arg = format!("mtu={mtu}");
+    let _ = run(
+        "netsh",
+        &["interface", "ipv4", "set", "subinterface", ifname, &mtu_arg, "store=active"],
+    )
+    .await;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub async fn apply(
+    cfg: &ClientConfig,
+    welcome: &Welcome,
+    ifname: &str,
+    server_ip: IpAddr,
+) -> Result<NetGuard> {
+    use entrotunnel_core::config::SessionMode;
+
+    let mut undo: Vec<(String, Vec<String>)> = Vec::new();
+    let resolv_backup: Option<String> = None; // Windows uses adapter DNS, not resolv.conf
+
+    let ip = welcome.assigned_ip.to_string();
+    let mask = prefix_to_mask(welcome.prefix_len);
+    let mtu = welcome.mtu.to_string();
+
+    set_adapter_ipv4(ifname, &ip, &mask, &mtu).await?;
+
+    // IPv6 address (NAT66) when the server offers v6 (default /64 on-link prefix).
+    if let Some(ip6) = welcome.assigned_ip6 {
+        let a = ip6.to_string();
+        let _ = run("netsh", &["interface", "ipv6", "add", "address", ifname, &a]).await;
+    }
+
+    let idx = if_index(ifname).await;
+    let orig_gw = default_gateway().await;
+    let tun_gw = welcome.gateway.to_string();
+
+    apply_route_rules(cfg, ifname, idx, &tun_gw, &orig_gw, server_ip, &mut undo).await;
+
+    match cfg.mode {
+        SessionMode::GlobalProxy => {
+            // Pin the server's own address to the physical gateway so the tunnel's
+            // carrier traffic never loops.
+            if let Some(gw) = &orig_gw {
+                let s = server_ip.to_string();
+                if run("route", &["add", &s, "mask", "255.255.255.255", gw]).await.is_ok() {
+                    undo.push(("route".into(), vec!["delete".into(), s]));
+                }
+            } else {
+                tracing::warn!("no default gateway; server pin route skipped");
+            }
+
+            if cfg.split_mode == crate::config::SplitMode::Whitelist {
+                tracing::info!("split mode = whitelist: only listed routes use {ifname}");
+            } else if let Some(idx) = idx {
+                let idxs = idx.to_string();
+                // Capture ALL v4 with two /1 routes via the tun (beat the 0/0 default).
+                for net in ["0.0.0.0", "128.0.0.0"] {
+                    if run("route", &["add", net, "mask", "128.0.0.0", &tun_gw, "metric", "1", "if", &idxs])
+                        .await
+                        .is_ok()
+                    {
+                        undo.push((
+                            "route".into(),
+                            vec!["delete".into(), net.into(), "mask".into(), "128.0.0.0".into(), tun_gw.clone()],
+                        ));
+                    } else {
+                        tracing::warn!("failed to add v4 capture route {net}/1 via {ifname}");
+                    }
+                }
+
+                // IPv6: route global v6 (::/1 + 8000::/1) at the tun — carrying it
+                // through the tunnel (NAT66) when the server offers v6, or
+                // blackholing it (kill-switch) when the server is v4-only so the
+                // host's native IPv6 can't leak the real IP. Skip if the carrier
+                // itself is v6 (would loop it into the tunnel).
+                if matches!(server_ip, IpAddr::V6(_)) {
+                    tracing::warn!("server reached over IPv6; skipping v6 capture/kill-switch to avoid looping the carrier");
+                } else if welcome.assigned_ip6.is_some() || cfg.ipv6_killswitch {
+                    for net6 in ["::/1", "8000::/1"] {
+                        if run("netsh", &["interface", "ipv6", "add", "route", net6, ifname, "store=active"])
+                            .await
+                            .is_ok()
+                        {
+                            undo.push((
+                                "netsh".into(),
+                                vec![
+                                    "interface".into(), "ipv6".into(), "delete".into(), "route".into(),
+                                    net6.into(), ifname.to_string(),
+                                ],
+                            ));
+                        }
+                    }
+                    if welcome.assigned_ip6.is_some() {
+                        tracing::info!("IPv6 routed through the tunnel (NAT66)");
+                    } else {
+                        tracing::info!("IPv6 leak protection: server v4-only — native IPv6 blackholed while connected");
+                    }
+                } else {
+                    tracing::warn!("IPv6 kill-switch OFF: server is v4-only, so native IPv6 will bypass the tunnel and may leak your real IP/location");
+                }
+
+                // DNS on the tun adapter (removed automatically when the adapter is
+                // torn down on disconnect, so no restore command is needed).
+                // `set` replaces the list with the primary; `add index=N` appends.
+                for (i, ns) in welcome.dns.iter().enumerate() {
+                    let addr = ns.to_string();
+                    let _ = if i == 0 {
+                        run("netsh", &["interface", "ipv4", "set", "dnsservers", ifname, "static", &addr, "validate=no"]).await
+                    } else {
+                        let idxarg = format!("index={}", i + 1);
+                        run("netsh", &["interface", "ipv4", "add", "dnsservers", ifname, &addr, &idxarg, "validate=no"]).await
+                    };
+                }
+                for (i, ns) in welcome.dns6.iter().enumerate() {
+                    let addr = ns.to_string();
+                    let _ = if i == 0 {
+                        run("netsh", &["interface", "ipv6", "set", "dnsservers", ifname, "static", &addr, "validate=no"]).await
+                    } else {
+                        let idxarg = format!("index={}", i + 1);
+                        run("netsh", &["interface", "ipv6", "add", "dnsservers", ifname, &addr, &idxarg, "validate=no"]).await
+                    };
+                }
+                if !welcome.dns.is_empty() || !welcome.dns6.is_empty() {
+                    tracing::info!("DNS → v4 {:?} v6 {:?}", welcome.dns, welcome.dns6);
+                }
+            } else {
+                tracing::warn!("could not resolve {ifname} interface index; global capture routes skipped");
+            }
+        }
+        SessionMode::Vpn => {
+            tracing::info!("VPN mode: virtual subnet reachable via {ifname}");
+        }
+        // No OS routing for proxy modes (the OS-proxy switch is the sysproxy guard).
+        SessionMode::HttpProxy | SessionMode::SystemProxy => {}
+    }
+
+    Ok(NetGuard { undo, resolv_backup })
+}
+
+/// Bring up the wintun adapter and route *only* the virtual subnet through it —
+/// used when a proxy-mode client also joins the VPN peer LAN. Assigning the
+/// address creates the on-link subnet route; the adapter drop removes it.
+#[cfg(target_os = "windows")]
+pub async fn apply_vpn_lan(welcome: &Welcome, ifname: &str) -> Result<NetGuard> {
+    let undo: Vec<(String, Vec<String>)> = Vec::new();
+    let ip = welcome.assigned_ip.to_string();
+    let mask = prefix_to_mask(welcome.prefix_len);
+    let mtu = welcome.mtu.to_string();
+    set_adapter_ipv4(ifname, &ip, &mask, &mtu).await?;
+    tracing::info!("VPN LAN: virtual subnet reachable via {ifname} (proxy mode + join)");
+    Ok(NetGuard { undo, resolv_backup: None })
+}
+
+/// Install the per-destination split-tunnel routes (Windows).
+#[cfg(target_os = "windows")]
+async fn apply_route_rules(
+    cfg: &ClientConfig,
+    _tun_ifname: &str,
+    tun_idx: Option<u32>,
+    tun_gw: &str,
+    orig_gw: &Option<String>,
+    server_ip: IpAddr,
+    undo: &mut Vec<(String, Vec<String>)>,
+) {
+    let server_route = format!("{server_ip}/32");
+    let mut seen = std::collections::HashSet::new();
+    for rule in &cfg.routes {
+        for route in resolve_rule_targets(&rule.target).await {
+            if route == server_route {
+                tracing::warn!(
+                    "route rule {} resolves to the server IP {server_ip}; skipped to keep the link up",
+                    rule.target
+                );
+                continue;
+            }
+            if !seen.insert(route.clone()) {
+                tracing::warn!("route {route} already claimed by an earlier rule; later rule ignored");
+                continue;
+            }
+            let Some((dest, mask)) = split_cidr(&route) else {
+                tracing::warn!("route rule {route}: cannot parse as an IPv4 CIDR; skipped");
+                continue;
+            };
+
+            // `route add <dest> mask <mask> <gw> [metric 1] [if <idx>]`.
+            let mut add: Vec<String> = vec!["add".into(), dest.clone(), "mask".into(), mask.clone()];
+            match rule.via.as_str() {
+                "tunnel" => match tun_idx {
+                    Some(i) => add.extend([tun_gw.to_string(), "metric".into(), "1".into(), "if".into(), i.to_string()]),
+                    None => {
+                        tracing::warn!("route rule {} via tunnel: no tun interface index", rule.target);
+                        continue;
+                    }
+                },
+                "direct" => match orig_gw {
+                    Some(gw) => add.push(gw.clone()),
+                    None => {
+                        tracing::warn!("route rule {} via direct: no default gateway", rule.target);
+                        continue;
+                    }
+                },
+                iface => match if_index(iface).await {
+                    Some(i) => {
+                        let gw = rule.gateway.as_ref().map(|g| g.to_string()).unwrap_or_else(|| "0.0.0.0".to_string());
+                        add.extend([gw, "if".into(), i.to_string()]);
+                    }
+                    None => {
+                        tracing::warn!("route rule {}: interface {iface} not found", rule.target);
+                        continue;
+                    }
+                },
+            }
+            let argref: Vec<&str> = add.iter().map(String::as_str).collect();
+            match run("route", &argref).await {
+                Ok(()) => {
+                    tracing::info!(target = %rule.target, route = %route, via = %rule.via, "split-route applied");
+                    undo.push(("route".into(), vec!["delete".into(), dest, "mask".into(), mask]));
+                }
+                Err(e) => tracing::warn!("route rule {route} via {}: {e}", rule.via),
+            }
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Other platforms — scaffold
+// ----------------------------------------------------------------------------
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub async fn apply(
     _cfg: &ClientConfig,
     _welcome: &Welcome,
     _ifname: &str,
     _server_ip: IpAddr,
 ) -> Result<NetGuard> {
-    Err(Error::NotImplemented(
-        "network configuration for this OS — TODO(impl) (Windows netsh)",
-    ))
+    Err(Error::NotImplemented("network configuration is not implemented on this OS"))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub async fn apply_vpn_lan(_welcome: &Welcome, _ifname: &str) -> Result<NetGuard> {
-    Err(Error::NotImplemented(
-        "VPN LAN routing for this OS — TODO(impl) (Windows netsh)",
-    ))
+    Err(Error::NotImplemented("VPN LAN routing is not implemented on this OS"))
 }

@@ -139,15 +139,54 @@ fn enable_impl(host: &str, port: &str) -> SysProxyGuard {
 }
 
 // ---------------------------------------------------------------------------
+// Windows — WinINet proxy via the HKCU registry, refreshed so it takes effect
+// without a logout. Proxy-aware apps (Edge/Chrome, most system HTTP) honour it.
+// ---------------------------------------------------------------------------
+#[cfg(target_os = "windows")]
+const INET_SETTINGS: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings";
+
+// Tell WinINet its settings changed + flush its cache (INTERNET_OPTION_SETTINGS_
+// CHANGED=39, INTERNET_OPTION_REFRESH=37) via a tiny P/Invoke — done in
+// PowerShell so there is no compile-time FFI to maintain.
+#[cfg(target_os = "windows")]
+const WININET_REFRESH: &str = "Add-Type -Namespace ET -Name WinInet -MemberDefinition '[System.Runtime.InteropServices.DllImport(\"wininet.dll\", SetLastError=true)] public static extern bool InternetSetOption(System.IntPtr h, int o, System.IntPtr b, int l);'; [void][ET.WinInet]::InternetSetOption([System.IntPtr]::Zero,39,[System.IntPtr]::Zero,0); [void][ET.WinInet]::InternetSetOption([System.IntPtr]::Zero,37,[System.IntPtr]::Zero,0)";
+
+#[cfg(target_os = "windows")]
+fn refresh_wininet() {
+    run("powershell", &["-NoProfile", "-NonInteractive", "-Command", WININET_REFRESH]);
+}
+
+#[cfg(target_os = "windows")]
+fn enable_impl(host: &str, port: &str) -> SysProxyGuard {
+    let server = format!("{host}:{port}");
+    let ok_srv = run("reg", &["add", INET_SETTINGS, "/v", "ProxyServer", "/t", "REG_SZ", "/d", &server, "/f"]);
+    // Don't proxy loopback / plain intranet names.
+    let _ = run("reg", &["add", INET_SETTINGS, "/v", "ProxyOverride", "/t", "REG_SZ", "/d", "localhost;127.*;<local>", "/f"]);
+    let ok_en = run("reg", &["add", INET_SETTINGS, "/v", "ProxyEnable", "/t", "REG_DWORD", "/d", "1", "/f"]);
+    if !(ok_srv && ok_en) {
+        warn!("system proxy: could not write WinINet registry settings; the local proxy is still up");
+        return SysProxyGuard::noop();
+    }
+    refresh_wininet();
+    info!("system proxy → {server} (WinINet, HTTP + HTTPS)");
+    SysProxyGuard {
+        undo: vec![
+            ("reg".into(), vec!["add".into(), INET_SETTINGS.into(), "/v".into(), "ProxyEnable".into(), "/t".into(), "REG_DWORD".into(), "/d".into(), "0".into(), "/f".into()]),
+            ("powershell".into(), vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), WININET_REFRESH.into()]),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Other platforms — not yet implemented (the local proxy still runs).
 // ---------------------------------------------------------------------------
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn enable_impl(_host: &str, _port: &str) -> SysProxyGuard {
     warn!("system proxy: not implemented on this OS; set the proxy manually (the local HTTP proxy is up)");
     SysProxyGuard::noop()
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn run(cmd: &str, args: &[&str]) -> bool {
     std::process::Command::new(cmd)
         .args(args)
