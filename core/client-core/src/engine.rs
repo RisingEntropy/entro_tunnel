@@ -18,6 +18,14 @@ use tracing::info;
 /// How often a VPN client asks the server for the current peer list.
 pub(crate) const PEER_REFRESH_SECS: u64 = 5;
 
+/// Reconnect attempts after an unexpected drop before giving up. No delay
+/// between them — we re-dial immediately.
+const RECONNECT_ATTEMPTS: u32 = 3;
+/// Bounded TUN-egress buffer (packets) held across a reconnect: traffic produced
+/// while the tunnel is down waits here and is flushed on reconnect. If the buffer
+/// fills (long outage) further packets apply backpressure; on give-up it's dropped.
+const OUT_BUFFER_PACKETS: usize = 8192;
+
 /// Live, mutable session info the front-end polls while the engine runs in the
 /// background. Written by the engine task, read by the GUI's `status` command.
 #[derive(Default)]
@@ -186,8 +194,50 @@ async fn run_session(
     let member = matches!(cfg.mode, SessionMode::Vpn) || cfg.join_vpn;
     match cfg.mode {
         SessionMode::GlobalProxy | SessionMode::Vpn => {
+            // Reconnect dials the server's *resolved IP* (DNS is tunnelled while
+            // we're down) with the original SNI, re-handshaking for the same
+            // virtual IP so the existing routing/DNS stay valid.
+            let re_endpoint = Endpoint {
+                host: server_ip.to_string(),
+                port: server.port,
+                kind: server.transport,
+                ws_path: "/et".to_string(),
+                server_name: server.sni(),
+            };
+            let re_security = security.clone();
+            let re_token = server.token.clone();
+            let re_mode = cfg.mode.wire();
+            let re_name = cfg.client_name.clone();
+            let re_join = cfg.join_vpn;
+            let reconnect = move |req_ip: Ipv4Addr| {
+                let endpoint = re_endpoint.clone();
+                let security = re_security.clone();
+                let token = re_token.clone();
+                let mode = re_mode; // SessionMode is Copy
+                let client_name = re_name.clone();
+                let join_vpn = re_join;
+                async move {
+                    let (sink, stream) = transport::connect(&endpoint, &security).await?;
+                    let (mut w, mut r) = protocol::frames(sink, stream);
+                    let hello = Hello {
+                        version: PROTOCOL_VERSION,
+                        token,
+                        mode,
+                        requested_ip: Some(req_ip),
+                        client_name,
+                        join_vpn,
+                    };
+                    w.send(&Frame::Hello(hello)).await?;
+                    let welcome = match r.recv().await? {
+                        Frame::Welcome(wl) => wl,
+                        Frame::Reject { reason } => return Err(Error::Auth(reason)),
+                        other => return Err(Error::Protocol(format!("expected Welcome, got {other:?}"))),
+                    };
+                    Ok((w, r, welcome))
+                }
+            };
             run_packet_mode(
-                &cfg, welcome, writer, reader, server_ip, member, shared, cancel,
+                &cfg, welcome, writer, reader, server_ip, member, shared, cancel, reconnect,
             )
             .await
         }
@@ -250,6 +300,27 @@ async fn run_chain_session(
     // is the first-hop connection's job above.
     match final_mode {
         SessionMode::GlobalProxy => {
+            // Reconnect rebuilds the whole chain, re-handshaking the egress hop
+            // for the same virtual IP so routing stays valid.
+            let re_hops = hops.clone();
+            let re_name = cfg.client_name.clone();
+            let re_cancel = cancel.clone();
+            let reconnect = move |req_ip: Ipv4Addr| {
+                let hops = re_hops.clone();
+                let client_name = re_name.clone();
+                let cancel = re_cancel.clone();
+                async move {
+                    let ch = crate::chain::connect_chain(
+                        &hops,
+                        SessionMode::GlobalProxy,
+                        Some(req_ip),
+                        client_name,
+                        &cancel,
+                    )
+                    .await?;
+                    Ok((ch.writer, ch.reader, ch.welcome))
+                }
+            };
             run_packet_mode(
                 &cfg,
                 welcome,
@@ -259,6 +330,7 @@ async fn run_chain_session(
                 false,
                 shared,
                 cancel,
+                reconnect,
             )
             .await
         }
@@ -295,8 +367,74 @@ fn spawn_vpn_lan(
     });
 }
 
-/// Packet path: bridge the TUN device and the encrypted frame channel.
-async fn run_packet_mode(
+/// Outcome of bridging one transport connection.
+enum ConnEnd {
+    /// The user cancelled (or the TUN reader ended) — shut down for good.
+    Cancelled,
+    /// The transport connection dropped — try to reconnect.
+    Lost,
+}
+
+/// Bridge the TUN and the current encrypted channel until it drops or is
+/// cancelled. Reads egress packets from the persistent `out_rx` buffer (so
+/// packets queued during a reconnect are flushed here on the next connection).
+async fn bridge_connection(
+    writer: &mut FrameWriter,
+    reader: &mut FrameReader,
+    out_rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
+    tun: &Arc<TunDevice>,
+    member: bool,
+    shared: &SharedStatus,
+    cancel: &CancellationToken,
+) -> ConnEnd {
+    let mut keepalive = tokio::time::interval(Duration::from_secs(KEEPALIVE_SECS));
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Poll the server for the VPN peer list (first tick fires immediately).
+    let mut peers_iv = tokio::time::interval(Duration::from_secs(PEER_REFRESH_SECS));
+    peers_iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return ConnEnd::Cancelled,
+            _ = keepalive.tick() => {
+                if writer.send(&Frame::Ping).await.is_err() { return ConnEnd::Lost; }
+            }
+            _ = peers_iv.tick(), if member => {
+                if writer.send(&Frame::GetPeers).await.is_err() { return ConnEnd::Lost; }
+            }
+            // Uplink: buffered TUN egress → server.
+            pkt = out_rx.recv() => match pkt {
+                Some(p) => {
+                    let n = p.len();
+                    if writer.send(&Frame::Packet(p)).await.is_err() { return ConnEnd::Lost; }
+                    add_traffic_up(shared, n);
+                }
+                None => return ConnEnd::Cancelled, // TUN reader ended (cancel)
+            },
+            // Downlink: server → TUN (+ cache any VPN peer list).
+            f = reader.recv() => match f {
+                Ok(Frame::Packet(pkt)) => {
+                    let n = pkt.len();
+                    let _ = tun.send(&pkt).await;
+                    add_traffic_down(shared, n);
+                }
+                Ok(Frame::Ping | Frame::Pong) => {}
+                Ok(Frame::PeerList { peers }) => {
+                    if let Ok(mut s) = shared.lock() { s.peers = peers; }
+                }
+                Ok(_) => {}
+                Err(_) => return ConnEnd::Lost,
+            }
+        }
+    }
+}
+
+/// Packet path: bridge the TUN device and the encrypted frame channel, with
+/// automatic reconnect. The TUN device and OS routing/DNS ([`netcfg`]) are
+/// brought up ONCE and kept alive across reconnects; only the transport
+/// connection is re-established. `reconnect(requested_ip)` re-dials + re-
+/// handshakes (asking for the same virtual IP so routing stays valid).
+#[allow(clippy::too_many_arguments)]
+async fn run_packet_mode<F, Fut>(
     cfg: &ClientConfig,
     welcome: Welcome,
     mut writer: FrameWriter,
@@ -305,7 +443,13 @@ async fn run_packet_mode(
     member: bool,
     shared: SharedStatus,
     cancel: CancellationToken,
-) -> Result<()> {
+    reconnect: F,
+) -> Result<()>
+where
+    F: Fn(Ipv4Addr) -> Fut + Send,
+    Fut: std::future::Future<Output = Result<(FrameWriter, FrameReader, Welcome)>> + Send,
+{
+    let assigned_ip = welcome.assigned_ip;
     let tun = Arc::new(
         TunDevice::create(&TunConfig {
             name: cfg.tun_name.clone(),
@@ -317,77 +461,93 @@ async fn run_packet_mode(
     );
     info!(dev = %tun.name(), "TUN device up");
 
-    // Restored on drop.
+    // Restored on drop — kept alive across reconnects so routing/DNS persist.
     let _net_guard = netcfg::apply(cfg, &welcome, tun.name(), server_ip).await?;
 
     let read_buf_len = (welcome.mtu as usize).max(2048);
 
-    // Uplink: TUN → server (with keepalive).
-    let tun_up = tun.clone();
-    let cancel_up = cancel.clone();
-    let shared_up = shared.clone();
-    let uplink = tokio::spawn(async move {
+    // Long-lived TUN → buffer reader. Feeds a bounded channel that PERSISTS
+    // across reconnects, so egress produced while the tunnel is down is buffered
+    // (and flushed by the next `bridge_connection`) instead of lost. On give-up
+    // the channel is dropped and any buffered packets discarded.
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(OUT_BUFFER_PACKETS);
+    let tun_reader = tun.clone();
+    let cancel_reader = cancel.clone();
+    let reader_task = tokio::spawn(async move {
         let mut buf = vec![0u8; read_buf_len];
-        let mut keepalive = tokio::time::interval(Duration::from_secs(KEEPALIVE_SECS));
-        keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        // Poll the server for the VPN peer list (first tick fires immediately so
-        // the UI populates right after connecting). Disabled for non-members via
-        // the branch precondition below.
-        let mut peers_iv = tokio::time::interval(Duration::from_secs(PEER_REFRESH_SECS));
-        peers_iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            tokio::select! {
-                _ = cancel_up.cancelled() => break,
-                _ = keepalive.tick() => {
-                    if writer.send(&Frame::Ping).await.is_err() { break; }
-                }
-                _ = peers_iv.tick(), if member => {
-                    if writer.send(&Frame::GetPeers).await.is_err() { break; }
-                }
-                r = tun_up.recv(&mut buf) => match r {
-                    Ok(n) if n > 0 => {
-                        if writer.send(&Frame::Packet(buf[..n].to_vec())).await.is_err() { break; }
-                        add_traffic_up(&shared_up, n);
-                    }
-                    Ok(_) => {}
+            let n = tokio::select! {
+                _ = cancel_reader.cancelled() => break,
+                r = tun_reader.recv(&mut buf) => match r {
+                    Ok(n) if n > 0 => n,
+                    Ok(_) => continue,
                     Err(e) => { tracing::debug!("tun recv: {e}"); break; }
                 }
+            };
+            let pkt = buf[..n].to_vec();
+            tokio::select! {
+                _ = cancel_reader.cancelled() => break,
+                res = out_tx.send(pkt) => if res.is_err() { break; },
             }
         }
-        let _ = writer.close().await;
     });
 
-    // Downlink: server → TUN (+ cache any VPN peer list the server pushes back).
-    let tun_down = tun.clone();
-    let cancel_down = cancel.clone();
-    let shared_down = shared.clone();
-    let downlink = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = cancel_down.cancelled() => break,
-                f = reader.recv() => match f {
-                    Ok(Frame::Packet(pkt)) => {
-                        let n = pkt.len();
-                        let _ = tun_down.send(&pkt).await;
-                        add_traffic_down(&shared_down, n);
+    // Connection loop: bridge the current channel; on an unexpected drop, re-dial
+    // immediately (up to RECONNECT_ATTEMPTS) while the TUN + routing stay up.
+    loop {
+        match bridge_connection(&mut writer, &mut reader, &mut out_rx, &tun, member, &shared, &cancel).await {
+            ConnEnd::Cancelled => break,
+            ConnEnd::Lost => {
+                if cancel.is_cancelled() {
+                    break;
+                }
+                let _ = writer.close().await;
+                tracing::warn!("tunnel connection lost; reconnecting (buffering traffic)…");
+                let mut reconnected = false;
+                for attempt in 1..=RECONNECT_ATTEMPTS {
+                    // Race each attempt against cancel so a user disconnect is
+                    // prompt even mid-dial.
+                    let result = tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        r = reconnect(assigned_ip) => r,
+                    };
+                    match result {
+                        Ok((w, r, new_welcome)) => {
+                            if new_welcome.assigned_ip != assigned_ip {
+                                tracing::warn!(
+                                    "reconnect assigned a different IP ({} vs {}); routing may be stale",
+                                    new_welcome.assigned_ip, assigned_ip
+                                );
+                            }
+                            writer = w;
+                            reader = r;
+                            if let Ok(mut s) = shared.lock() {
+                                s.assigned_ip = Some(new_welcome.assigned_ip);
+                            }
+                            reconnected = true;
+                            info!("reconnected on attempt {attempt}/{RECONNECT_ATTEMPTS}; flushing buffered traffic");
+                            break;
+                        }
+                        Err(e) => tracing::warn!(
+                            "reconnect attempt {attempt}/{RECONNECT_ATTEMPTS} failed: {e}"
+                        ),
                     }
-                    Ok(Frame::Ping | Frame::Pong) => {}
-                    Ok(Frame::PeerList { peers }) => {
-                        if let Ok(mut s) = shared_down.lock() { s.peers = peers; }
-                    }
-                    Ok(_) => {}
-                    Err(_) => break,
+                }
+                if cancel.is_cancelled() {
+                    break; // user disconnected during a reconnect attempt
+                }
+                if !reconnected {
+                    tracing::warn!(
+                        "reconnect failed after {RECONNECT_ATTEMPTS} attempts; disconnecting (buffered traffic dropped)"
+                    );
+                    break;
                 }
             }
         }
-    });
-
-    tokio::select! {
-        _ = cancel.cancelled() => {}
-        _ = uplink => {}
-        _ = downlink => {}
     }
+
     cancel.cancel();
+    reader_task.abort();
     info!("session closed; restoring network configuration");
     Ok(())
 }
