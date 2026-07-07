@@ -1,5 +1,8 @@
 A self-hosted, end-to-end-encrypted VPN / proxy written in Rust. One engine powers a **server** (with a web admin panel), a **desktop GUI** (Tauri — macOS / Windows / Linux), a **CLI**, and an **Android** client. No plaintext anywhere — you run every hop yourself.
 
+## What's new in v1.3.1
+- 🔁 **Auto-reconnect** — if the tunnel drops in Global-proxy / VPN mode, the client now re-dials immediately (up to 3 attempts) while keeping the virtual NIC and routing/DNS in place, instead of dropping the session. Egress traffic produced during a reconnect is buffered and flushed once reconnected (dropped only if all attempts fail).
+
 ## What's new in v1.3
 - 🪟 **Windows feature parity** — Global-proxy (TUN), VPN peer-LAN, split-tunnel routing, tunnelled DNS, and the IPv6 kill-switch now work on Windows (via `netsh`/`route` on the Wintun adapter), and **System-proxy** mode sets the WinINet proxy. Windows previously tunnelled only via HTTP-proxy mode.
 
