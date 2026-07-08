@@ -387,31 +387,40 @@ async fn bridge_connection(
     shared: &SharedStatus,
     cancel: &CancellationToken,
 ) -> ConnEnd {
-    let mut keepalive = tokio::time::interval(Duration::from_secs(KEEPALIVE_SECS));
-    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // Poll the server for the VPN peer list (first tick fires immediately).
-    let mut peers_iv = tokio::time::interval(Duration::from_secs(PEER_REFRESH_SECS));
-    peers_iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => return ConnEnd::Cancelled,
-            _ = keepalive.tick() => {
-                if writer.send(&Frame::Ping).await.is_err() { return ConnEnd::Lost; }
-            }
-            _ = peers_iv.tick(), if member => {
-                if writer.send(&Frame::GetPeers).await.is_err() { return ConnEnd::Lost; }
-            }
-            // Uplink: buffered TUN egress → server.
-            pkt = out_rx.recv() => match pkt {
-                Some(p) => {
-                    let n = p.len();
-                    if writer.send(&Frame::Packet(p)).await.is_err() { return ConnEnd::Lost; }
-                    add_traffic_up(shared, n);
+    // Uplink and downlink run CONCURRENTLY (two futures polled together), NOT
+    // merged into one select loop: a slow `writer.send()` must never stall
+    // `reader.recv()`, or the socket's receive buffer backs up and throughput
+    // collapses — acute on high-latency multi-hop chains. Uplink returns `true`
+    // if the writer died (reconnectable) or `false` if the egress buffer closed
+    // (TUN reader gone → fatal). Downlink returns on any reader error.
+    let uplink = async {
+        let mut keepalive = tokio::time::interval(Duration::from_secs(KEEPALIVE_SECS));
+        keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Poll the server for the VPN peer list (first tick fires immediately).
+        let mut peers_iv = tokio::time::interval(Duration::from_secs(PEER_REFRESH_SECS));
+        peers_iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = keepalive.tick() => {
+                    if writer.send(&Frame::Ping).await.is_err() { return true; }
                 }
-                None => return ConnEnd::Cancelled, // TUN reader ended (cancel)
-            },
-            // Downlink: server → TUN (+ cache any VPN peer list).
-            f = reader.recv() => match f {
+                _ = peers_iv.tick(), if member => {
+                    if writer.send(&Frame::GetPeers).await.is_err() { return true; }
+                }
+                pkt = out_rx.recv() => match pkt {
+                    Some(p) => {
+                        let n = p.len();
+                        if writer.send(&Frame::Packet(p)).await.is_err() { return true; }
+                        add_traffic_up(shared, n);
+                    }
+                    None => return false, // TUN reader ended (cancel / fatal)
+                }
+            }
+        }
+    };
+    let downlink = async {
+        loop {
+            match reader.recv().await {
                 Ok(Frame::Packet(pkt)) => {
                     let n = pkt.len();
                     let _ = tun.send(&pkt).await;
@@ -422,9 +431,16 @@ async fn bridge_connection(
                     if let Ok(mut s) = shared.lock() { s.peers = peers; }
                 }
                 Ok(_) => {}
-                Err(_) => return ConnEnd::Lost,
+                Err(_) => return,
             }
         }
+    };
+
+    tokio::pin!(uplink, downlink);
+    tokio::select! {
+        _ = cancel.cancelled() => ConnEnd::Cancelled,
+        writer_died = &mut uplink => if writer_died { ConnEnd::Lost } else { ConnEnd::Cancelled },
+        _ = &mut downlink => ConnEnd::Lost,
     }
 }
 
