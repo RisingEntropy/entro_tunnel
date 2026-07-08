@@ -26,6 +26,15 @@ const RECONNECT_ATTEMPTS: u32 = 3;
 /// fills (long outage) further packets apply backpressure; on give-up it's dropped.
 const OUT_BUFFER_PACKETS: usize = 8192;
 
+/// A single frame write that takes longer than this means the socket is wedged
+/// (half-open / stalled send window with no RST) — treat the connection as dead.
+const SEND_TIMEOUT_SECS: u64 = 15;
+/// Pings sent with no answering pong before the tunnel is declared stalled. The
+/// server pongs every ping, so a missing round-trip means one direction died
+/// silently (no error/RST). With KEEPALIVE_SECS=15 this trips in ~45s and then
+/// reconnects — catching the "no uplink / no downlink but still 'connected'" hang.
+const MISSED_PONG_LIMIT: u32 = 3;
+
 /// Live, mutable session info the front-end polls while the engine runs in the
 /// background. Written by the engine task, read by the GUI's `status` command.
 #[derive(Default)]
@@ -393,7 +402,18 @@ async fn bridge_connection(
     // collapses — acute on high-latency multi-hop chains. Uplink returns `true`
     // if the writer died (reconnectable) or `false` if the egress buffer closed
     // (TUN reader gone → fatal). Downlink returns on any reader error.
-    let uplink = async {
+    //
+    // `pending_pings` is a bidirectional heartbeat: uplink bumps it per ping,
+    // downlink resets it on the answering pong. If it reaches MISSED_PONG_LIMIT
+    // the round-trip is broken (one direction died silently, no RST), so uplink
+    // declares the connection dead → reconnect. Writes are also bounded by a
+    // timeout so a wedged send can't hang the uplink forever.
+    use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+    let pending_pings = Arc::new(AtomicU32::new(0));
+    let send_to = Duration::from_secs(SEND_TIMEOUT_SECS);
+
+    let pending_up = pending_pings.clone();
+    let uplink = async move {
         let mut keepalive = tokio::time::interval(Duration::from_secs(KEEPALIVE_SECS));
         keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Poll the server for the VPN peer list (first tick fires immediately).
@@ -402,35 +422,58 @@ async fn bridge_connection(
         loop {
             tokio::select! {
                 _ = keepalive.tick() => {
-                    if writer.send(&Frame::Ping).await.is_err() { return true; }
+                    if pending_up.load(Relaxed) >= MISSED_PONG_LIMIT {
+                        tracing::warn!(
+                            "no pong in ~{}s — tunnel stalled (half-open); reconnecting",
+                            MISSED_PONG_LIMIT as u64 * KEEPALIVE_SECS
+                        );
+                        return true;
+                    }
+                    match tokio::time::timeout(send_to, writer.send(&Frame::Ping)).await {
+                        Ok(Ok(())) => { pending_up.fetch_add(1, Relaxed); }
+                        _ => return true,
+                    }
                 }
                 _ = peers_iv.tick(), if member => {
-                    if writer.send(&Frame::GetPeers).await.is_err() { return true; }
+                    match tokio::time::timeout(send_to, writer.send(&Frame::GetPeers)).await {
+                        Ok(Ok(())) => {}
+                        _ => return true,
+                    }
                 }
                 pkt = out_rx.recv() => match pkt {
                     Some(p) => {
                         let n = p.len();
-                        if writer.send(&Frame::Packet(p)).await.is_err() { return true; }
-                        add_traffic_up(shared, n);
+                        match tokio::time::timeout(send_to, writer.send(&Frame::Packet(p))).await {
+                            Ok(Ok(())) => add_traffic_up(shared, n),
+                            _ => return true,
+                        }
                     }
                     None => return false, // TUN reader ended (cancel / fatal)
                 }
             }
         }
     };
-    let downlink = async {
+    let pending_down = pending_pings.clone();
+    let downlink = async move {
         loop {
             match reader.recv().await {
-                Ok(Frame::Packet(pkt)) => {
-                    let n = pkt.len();
-                    let _ = tun.send(&pkt).await;
-                    add_traffic_down(shared, n);
+                Ok(frame) => {
+                    // Any frame proves the downlink is alive → reset the heartbeat.
+                    // (A totally silent downlink for MISSED_PONG_LIMIT pings is what
+                    // trips it; a wedged uplink is caught by the send timeout.)
+                    pending_down.store(0, Relaxed);
+                    match frame {
+                        Frame::Packet(pkt) => {
+                            let n = pkt.len();
+                            let _ = tun.send(&pkt).await;
+                            add_traffic_down(shared, n);
+                        }
+                        Frame::PeerList { peers } => {
+                            if let Ok(mut s) = shared.lock() { s.peers = peers; }
+                        }
+                        _ => {}
+                    }
                 }
-                Ok(Frame::Ping | Frame::Pong) => {}
-                Ok(Frame::PeerList { peers }) => {
-                    if let Ok(mut s) = shared.lock() { s.peers = peers; }
-                }
-                Ok(_) => {}
                 Err(_) => return,
             }
         }
