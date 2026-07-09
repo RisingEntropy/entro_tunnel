@@ -280,6 +280,29 @@ async fn run_chain_session(
         return Box::pin(run_session(c, cancel, shared)).await;
     }
 
+    // Pre-resolve the FIRST hop's IP now — while DNS still works, before the
+    // tunnel captures it. Dialing hop 0 by IP lets reconnects succeed even when
+    // DNS is down during an outage (DNS routes through the stalled tunnel, so
+    // re-resolving a hostname there fails — the cause of chains never recovering).
+    // The original hostname is preserved as the TLS SNI. Later hops are resolved
+    // server-side by the relay, so they don't need this.
+    let hops = {
+        let mut hops = hops;
+        match resolve_server(&hops[0].host, hops[0].port).await {
+            Ok(ip) => {
+                if hops[0].server_name.is_none() && hops[0].host.parse::<IpAddr>().is_err() {
+                    hops[0].server_name = Some(hops[0].host.clone());
+                }
+                hops[0].host = ip.to_string();
+            }
+            Err(e) => tracing::warn!(
+                "could not pre-resolve first chain hop {}: {e}; reconnect will fail if DNS goes down",
+                hops[0].host
+            ),
+        }
+        hops
+    };
+
     // Egress: build the chain; the chosen mode runs at the last hop.
     let chain = crate::chain::connect_chain(
         &hops,

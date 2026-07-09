@@ -1,5 +1,8 @@
 A self-hosted, end-to-end-encrypted VPN / proxy written in Rust. One engine powers a **server** (with a web admin panel), a **desktop GUI** (Tauri — macOS / Windows / Linux), a **CLI**, and an **Android** client. No plaintext anywhere — you run every hop yourself.
 
+## What's new in v1.3.4
+- 🔗 **Proxy-chain reconnect fix** — a stalled chain couldn't recover because reconnect re-resolved the first hop's hostname via DNS, which is dead during an outage (DNS routes through the down tunnel). The first hop is now resolved once up front and re-dialed by IP (TLS SNI preserved), so chains self-heal like single-server connections.
+
 ## What's new in v1.3.3
 - 🩺 **Dead-peer / half-open detection** — fixes a hang where one direction of the tunnel silently died (no up, or no down traffic) while the app still showed "connected" and never reconnected. The client now runs a bidirectional heartbeat (ping/pong) plus a send timeout: if the round-trip stalls (~45s) or a write wedges, it reconnects automatically.
 
