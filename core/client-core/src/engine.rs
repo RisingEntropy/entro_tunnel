@@ -8,7 +8,7 @@ use crate::tun::{TunConfig, TunDevice};
 use entrotunnel_core::config::{parse_psk, SessionMode};
 use entrotunnel_core::protocol::{self, Frame, FrameReader, FrameWriter, Hello, PeerInfo, Welcome};
 use entrotunnel_core::transport::{self, ClientSecurity, Endpoint};
-use entrotunnel_core::{Error, Result, KEEPALIVE_SECS, PROTOCOL_VERSION};
+use entrotunnel_core::{Error, Result, PROTOCOL_VERSION};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -28,11 +28,17 @@ const OUT_BUFFER_PACKETS: usize = 8192;
 
 /// A single frame write that takes longer than this means the socket is wedged
 /// (half-open / stalled send window with no RST) — treat the connection as dead.
-const SEND_TIMEOUT_SECS: u64 = 15;
-/// Pings sent with no answering pong before the tunnel is declared stalled. The
-/// server pongs every ping, so a missing round-trip means one direction died
-/// silently (no error/RST). With KEEPALIVE_SECS=15 this trips in ~45s and then
-/// reconnects — catching the "no uplink / no downlink but still 'connected'" hang.
+/// Catches a stalled *uplink* (we can't send) even while the downlink looks fine.
+const SEND_TIMEOUT_SECS: u64 = 8;
+/// Fast heartbeat: ping the server every second. The server pongs every ping,
+/// and ANY received frame (data OR pong) resets the miss counter — so a busy or
+/// merely idle-but-healthy tunnel never trips, while one that goes completely
+/// silent (no down traffic and no pong) is caught within a couple of seconds.
+const STALL_PING_SECS: u64 = 1;
+/// Consecutive 1s pings with no answering frame before the tunnel is declared
+/// stalled and reconnected (~3s of total downlink silence). Kept at 3 (not 1) so
+/// normal chain RTT/jitter — where a pong can legitimately arrive a second or two
+/// late — doesn't cause false reconnects; a single 1s gap is within normal jitter.
 const MISSED_PONG_LIMIT: u32 = 3;
 
 /// Live, mutable session info the front-end polls while the engine runs in the
@@ -437,7 +443,7 @@ async fn bridge_connection(
 
     let pending_up = pending_pings.clone();
     let uplink = async move {
-        let mut keepalive = tokio::time::interval(Duration::from_secs(KEEPALIVE_SECS));
+        let mut keepalive = tokio::time::interval(Duration::from_secs(STALL_PING_SECS));
         keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Poll the server for the VPN peer list (first tick fires immediately).
         let mut peers_iv = tokio::time::interval(Duration::from_secs(PEER_REFRESH_SECS));
@@ -447,8 +453,8 @@ async fn bridge_connection(
                 _ = keepalive.tick() => {
                     if pending_up.load(Relaxed) >= MISSED_PONG_LIMIT {
                         tracing::warn!(
-                            "no pong in ~{}s — tunnel stalled (half-open); reconnecting",
-                            MISSED_PONG_LIMIT as u64 * KEEPALIVE_SECS
+                            "no downlink traffic for ~{}s — tunnel stalled (half-open); reconnecting",
+                            MISSED_PONG_LIMIT as u64 * STALL_PING_SECS
                         );
                         return true;
                     }
