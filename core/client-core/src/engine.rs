@@ -8,7 +8,7 @@ use crate::tun::{TunConfig, TunDevice};
 use entrotunnel_core::config::{parse_psk, SessionMode};
 use entrotunnel_core::protocol::{self, Frame, FrameReader, FrameWriter, Hello, PeerInfo, Welcome};
 use entrotunnel_core::transport::{self, ClientSecurity, Endpoint};
-use entrotunnel_core::{Error, Result, PROTOCOL_VERSION};
+use entrotunnel_core::{Error, Result, KEEPALIVE_SECS, PROTOCOL_VERSION};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -28,18 +28,12 @@ const OUT_BUFFER_PACKETS: usize = 8192;
 
 /// A single frame write that takes longer than this means the socket is wedged
 /// (half-open / stalled send window with no RST) — treat the connection as dead.
-/// Catches a stalled *uplink* (we can't send) even while the downlink looks fine.
 const SEND_TIMEOUT_SECS: u64 = 8;
-/// Fast heartbeat: ping the server every second. The server pongs every ping,
-/// and ANY received frame (data OR pong) resets the miss counter — so a busy or
-/// merely idle-but-healthy tunnel never trips, while one that goes completely
-/// silent (no down traffic and no pong) is caught within a couple of seconds.
-const STALL_PING_SECS: u64 = 1;
-/// Consecutive 1s pings with no answering frame before the tunnel is declared
-/// stalled and reconnected (~3s of total downlink silence). Kept at 3 (not 1) so
-/// normal chain RTT/jitter — where a pong can legitimately arrive a second or two
-/// late — doesn't cause false reconnects; a single 1s gap is within normal jitter.
-const MISSED_PONG_LIMIT: u32 = 3;
+/// Traffic-based stall detection (no pings): if ONE direction keeps moving traffic
+/// while the OTHER stays completely silent for this many seconds, the tunnel is
+/// half-open → reconnect. Both directions silent = idle (nothing to proxy), which
+/// never trips. Bump this if normal request/response latency causes false trips.
+const STALL_SILENT_SECS: u64 = 1;
 
 /// Live, mutable session info the front-end polls while the engine runs in the
 /// background. Written by the engine task, read by the GUI's `status` command.
@@ -77,6 +71,12 @@ pub(crate) fn add_traffic_down(shared: &SharedStatus, n: usize) {
     if let Ok(mut s) = shared.lock() {
         s.down_bytes = s.down_bytes.saturating_add(n as u64);
     }
+}
+
+/// Snapshot of `(up_bytes, down_bytes)` for the stall monitor.
+#[inline]
+fn traffic_counters(shared: &SharedStatus) -> (u64, u64) {
+    shared.lock().map(|s| (s.up_bytes, s.down_bytes)).unwrap_or((0, 0))
 }
 
 /// Stateless entry point for running the client.
@@ -432,18 +432,14 @@ async fn bridge_connection(
     // if the writer died (reconnectable) or `false` if the egress buffer closed
     // (TUN reader gone → fatal). Downlink returns on any reader error.
     //
-    // `pending_pings` is a bidirectional heartbeat: uplink bumps it per ping,
-    // downlink resets it on the answering pong. If it reaches MISSED_PONG_LIMIT
-    // the round-trip is broken (one direction died silently, no RST), so uplink
-    // declares the connection dead → reconnect. Writes are also bounded by a
-    // timeout so a wedged send can't hang the uplink forever.
-    use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
-    let pending_pings = Arc::new(AtomicU32::new(0));
+    // Stall detection is TRAFFIC-based (no pings): the `monitor` future watches
+    // the byte counters and reconnects the moment one direction goes silent while
+    // the other is active (a half-open tunnel). A low-rate keepalive still runs
+    // purely to hold the connection open when genuinely idle.
     let send_to = Duration::from_secs(SEND_TIMEOUT_SECS);
 
-    let pending_up = pending_pings.clone();
     let uplink = async move {
-        let mut keepalive = tokio::time::interval(Duration::from_secs(STALL_PING_SECS));
+        let mut keepalive = tokio::time::interval(Duration::from_secs(KEEPALIVE_SECS));
         keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Poll the server for the VPN peer list (first tick fires immediately).
         let mut peers_iv = tokio::time::interval(Duration::from_secs(PEER_REFRESH_SECS));
@@ -451,15 +447,8 @@ async fn bridge_connection(
         loop {
             tokio::select! {
                 _ = keepalive.tick() => {
-                    if pending_up.load(Relaxed) >= MISSED_PONG_LIMIT {
-                        tracing::warn!(
-                            "no downlink traffic for ~{}s — tunnel stalled (half-open); reconnecting",
-                            MISSED_PONG_LIMIT as u64 * STALL_PING_SECS
-                        );
-                        return true;
-                    }
                     match tokio::time::timeout(send_to, writer.send(&Frame::Ping)).await {
-                        Ok(Ok(())) => { pending_up.fetch_add(1, Relaxed); }
+                        Ok(Ok(())) => {}
                         _ => return true,
                     }
                 }
@@ -482,37 +471,63 @@ async fn bridge_connection(
             }
         }
     };
-    let pending_down = pending_pings.clone();
     let downlink = async move {
         loop {
             match reader.recv().await {
-                Ok(frame) => {
-                    // Any frame proves the downlink is alive → reset the heartbeat.
-                    // (A totally silent downlink for MISSED_PONG_LIMIT pings is what
-                    // trips it; a wedged uplink is caught by the send timeout.)
-                    pending_down.store(0, Relaxed);
-                    match frame {
-                        Frame::Packet(pkt) => {
-                            let n = pkt.len();
-                            let _ = tun.send(&pkt).await;
-                            add_traffic_down(shared, n);
-                        }
-                        Frame::PeerList { peers } => {
-                            if let Ok(mut s) = shared.lock() { s.peers = peers; }
-                        }
-                        _ => {}
-                    }
+                Ok(Frame::Packet(pkt)) => {
+                    let n = pkt.len();
+                    let _ = tun.send(&pkt).await;
+                    add_traffic_down(shared, n);
                 }
+                Ok(Frame::PeerList { peers }) => {
+                    if let Ok(mut s) = shared.lock() { s.peers = peers; }
+                }
+                Ok(_) => {}
                 Err(_) => return,
             }
         }
     };
+    // Traffic monitor: each second, if exactly ONE direction moved bytes (the
+    // other silent) for STALL_SILENT_SECS running, the tunnel is half-open →
+    // reconnect. Both moving = healthy; both silent = idle (no trip). Keepalive
+    // Ping/Pong traffic is negligible and only registers on idle seconds where
+    // both sides move together, so it never causes a false trip.
+    let monitor = async {
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        tick.tick().await; // consume the immediate first tick
+        let (mut last_up, mut last_down) = traffic_counters(shared);
+        let mut silent_secs = 0u64;
+        loop {
+            tick.tick().await;
+            let (up, down) = traffic_counters(shared);
+            let up_moved = up > last_up;
+            let down_moved = down > last_down;
+            last_up = up;
+            last_down = down;
+            if up_moved != down_moved {
+                silent_secs += 1;
+                if silent_secs >= STALL_SILENT_SECS {
+                    let dead = if up_moved { "downlink" } else { "uplink" };
+                    tracing::warn!(
+                        "no {dead} traffic for {}s while {} is active — tunnel stalled; reconnecting",
+                        silent_secs,
+                        if up_moved { "uplink" } else { "downlink" }
+                    );
+                    return;
+                }
+            } else {
+                silent_secs = 0; // both moving (healthy) or both idle
+            }
+        }
+    };
 
-    tokio::pin!(uplink, downlink);
+    tokio::pin!(uplink, downlink, monitor);
     tokio::select! {
         _ = cancel.cancelled() => ConnEnd::Cancelled,
         writer_died = &mut uplink => if writer_died { ConnEnd::Lost } else { ConnEnd::Cancelled },
         _ = &mut downlink => ConnEnd::Lost,
+        _ = &mut monitor => ConnEnd::Lost,
     }
 }
 
