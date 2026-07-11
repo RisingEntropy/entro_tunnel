@@ -1,5 +1,8 @@
 A self-hosted, end-to-end-encrypted VPN / proxy written in Rust. One engine powers a **server** (with a web admin panel), a **desktop GUI** (Tauri — macOS / Windows / Linux), a **CLI**, and an **Android** client. No plaintext anywhere — you run every hop yourself.
 
+## What's new in v1.3.6
+- 🪟 **Windows: no more console flashing on connect** — the client configured the network via `netsh`/`route`/`reg`/`powershell`, and each call briefly popped a console window (a storm of flashes plus a PowerShell window on connect). Those helpers now run with `CREATE_NO_WINDOW`, so connecting is silent.
+
 ## What's new in v1.3.5
 - ⚡ **Traffic-based stall detection** — the client now watches the up/down byte counters directly (no keepalive-ping round-trip): if one direction goes silent for ~1s while the other is active (a half-open tunnel), it reconnects immediately. Both directions idle does not trip (nothing to proxy).
 

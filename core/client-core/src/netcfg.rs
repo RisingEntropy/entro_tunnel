@@ -25,7 +25,14 @@ pub struct NetGuard {
 impl Drop for NetGuard {
     fn drop(&mut self) {
         for (cmd, args) in &self.undo {
-            let _ = std::process::Command::new(cmd).args(args).status();
+            let mut c = std::process::Command::new(cmd);
+            c.args(args);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            }
+            let _ = c.status();
         }
         if let Some(backup) = self.resolv_backup.take() {
             if write_in_place("/etc/resolv.conf", &backup).is_ok() {
@@ -664,10 +671,17 @@ async fn apply_route_rules(
 // other OSes use. DNS is set on the tun adapter (removed when it's torn down);
 // no /etc/resolv.conf. Compiles on Windows CI; runtime-tested by the user.
 // ----------------------------------------------------------------------------
+/// `CREATE_NO_WINDOW` — run the console helpers (netsh/route) without popping a
+/// console window each time. Without it, a GUI launch flashes a window per call
+/// on every connect (there are a dozen+), which looks like the screen flickering.
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 #[cfg(target_os = "windows")]
 async fn run(cmd: &str, args: &[&str]) -> Result<()> {
     let out = tokio::process::Command::new(cmd)
         .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .await
         .map_err(|e| Error::Transport(format!("spawn `{cmd}`: {e}")))?;
@@ -683,7 +697,12 @@ async fn run(cmd: &str, args: &[&str]) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 async fn cmd_out(cmd: &str, args: &[&str]) -> Option<String> {
-    let out = tokio::process::Command::new(cmd).args(args).output().await.ok()?;
+    let out = tokio::process::Command::new(cmd)
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .await
+        .ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())

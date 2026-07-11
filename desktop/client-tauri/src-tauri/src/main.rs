@@ -495,8 +495,10 @@ fn elevate_relaunch(exe: &str, cfg_dir: &str) -> Result<(), String> {
         exe.replace('\'', "''"),
         cfg_dir.replace('\'', "''")
     );
+    use std::os::windows::process::CommandExt;
     let st = std::process::Command::new("powershell")
         .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps])
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW — no console flash (UAC still shows)
         .status()
         .map_err(|e| e.to_string())?;
     if st.success() {

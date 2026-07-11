@@ -28,7 +28,14 @@ impl Drop for SysProxyGuard {
             return;
         }
         for (cmd, args) in &self.undo {
-            let _ = std::process::Command::new(cmd).args(args).status();
+            let mut c = std::process::Command::new(cmd);
+            c.args(args);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            }
+            let _ = c.status();
         }
         info!("system proxy disabled (OS settings restored)");
     }
@@ -188,9 +195,13 @@ fn enable_impl(_host: &str, _port: &str) -> SysProxyGuard {
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn run(cmd: &str, args: &[&str]) -> bool {
-    std::process::Command::new(cmd)
-        .args(args)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let mut c = std::process::Command::new(cmd);
+    c.args(args);
+    // Don't flash a console window on Windows (reg / powershell run headless).
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    c.status().map(|s| s.success()).unwrap_or(false)
 }
